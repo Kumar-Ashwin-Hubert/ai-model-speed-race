@@ -21,7 +21,7 @@ every extra second per decision makes the queue longer and the bill bigger. The 
 ## See it in 60 seconds (no keys needed)
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Kumar-Ashwin-Hubert/ai-model-speed-race.git
 cd ai-model-speed-race
 npm run demo
 ```
