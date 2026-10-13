@@ -39,18 +39,27 @@ test('queue has the requested size, sequential ids and a fixed reject share', ()
   }
 });
 
-test('ground truth matches an independent oracle for every rule (no accidental violations)', () => {
-  for (const seed of [1, 2, 3, 99, 2026, 31337]) {
-    for (const paper of generatePapers(seed, 50)) {
-      for (const rule of RULE_IDS) {
-        assert.equal(
-          ORACLE[rule](paper),
-          paper.violations.includes(rule),
-          `seed ${seed} paper ${paper.id}: rule "${rule}" disagrees with oracle\n${dossierToText(paper.dossier)}`,
-        );
-      }
-      assert.equal(paper.truth, paper.violations.length > 0 ? 'reject' : 'approve');
+function assertGroundTruth(seed, count) {
+  for (const paper of generatePapers(seed, count)) {
+    for (const rule of RULE_IDS) {
+      assert.equal(
+        ORACLE[rule](paper),
+        paper.violations.includes(rule),
+        `seed ${seed} paper ${paper.id}: rule "${rule}" disagrees with oracle\n${dossierToText(paper.dossier)}`,
+      );
     }
+    assert.equal(paper.truth, paper.violations.length > 0 ? 'reject' : 'approve');
+  }
+}
+
+test('ground truth matches an independent oracle for every rule (no accidental violations)', () => {
+  for (const seed of [1, 2, 3, 99, 2026, 31337]) assertGroundTruth(seed, 50);
+});
+
+test('ground truth holds across many seeds and queue sizes, including seeds seen in live runs', () => {
+  const seeds = [...Array.from({ length: 400 }, (_, index) => index + 1), 19385, 75093, 77998, 84952, 999999];
+  for (const seed of seeds) {
+    for (const count of [10, 20, 30]) assertGroundTruth(seed, count);
   }
 });
 
