@@ -195,7 +195,7 @@ function onEvent(type, data = {}) {
 // ---- Toolbar, tabs, panel ----------------------------------------------------------------------
 
 const STATUS_TEXT = {
-  ready: 'Ready. Both queues are identical for every desk.',
+  ready: 'Ready. All three desks get the identical queue.',
   warming: 'Briefing the approvers: opening connections (not timed)...',
   running: 'Shift in progress. Click a lane to inspect that desk.',
   finished: 'Shift complete.',

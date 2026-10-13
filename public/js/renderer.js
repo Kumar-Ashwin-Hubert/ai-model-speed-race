@@ -737,17 +737,18 @@ export class Renderer {
     if (progress > 0) fillRR(ctx, barX, Y.card + 12, Math.max(12, barW * progress), 12, 6, accent);
     text(ctx, `${stats.done}/${stats.total}`, x + w - 12, Y.card + 23, { size: 14, color: C.text, align: 'right' });
 
+    // `Wrong` = answers that did not match the ground truth; `Failed` = calls that produced no usable answer.
     const rows = [
-      [`Last ${fmtMs(stats.lastMs)}`, `Avg ${fmtMs(stats.avgMs)}`, `P95 ${fmtMs(stats.p95Ms)}`],
-      [`Acc ${fmtPercent(stats.accuracy)}`, `Err ${stats.errors}`, stats.perMinute ? `${stats.perMinute.toFixed(stats.perMinute < 100 ? 1 : 0)}/min` : '-/min'],
-      [`Tok ${fmtTokens(stats.tokensIn + stats.tokensOut)}`, `Cost ${fmtMoney(stats.cost)}`, ''],
+      [{ t: `Last ${fmtMs(stats.lastMs)}` }, { t: `Avg ${fmtMs(stats.avgMs)}` }, { t: `P95 ${fmtMs(stats.p95Ms)}` }],
+      [{ t: `Acc ${fmtPercent(stats.accuracy)}` }, { t: `Wrong ${stats.wrong}`, c: stats.wrong > 0 ? C.deny : null }, { t: stats.perMinute ? `${stats.perMinute.toFixed(stats.perMinute < 100 ? 1 : 0)}/min` : '-/min' }],
+      [{ t: `Tok ${fmtTokens(stats.tokensIn + stats.tokensOut)}` }, { t: `Cost ${fmtMoney(stats.cost)}` }, { t: `Failed ${stats.errors}`, c: stats.errors > 0 ? C.deny : null }],
     ];
     rows.forEach((cols, r) => {
       const y = Y.card + 45 + r * 16;
-      const color = r === 0 ? C.text : C.dim;
-      text(ctx, cols[0], x + 12, y, { size: 13, color });
-      text(ctx, cols[1], x + 132, y, { size: 13, color });
-      text(ctx, cols[2], x + w - 12, y, { size: 13, color, align: 'right' });
+      const base = r === 0 ? C.text : C.dim;
+      text(ctx, cols[0].t, x + 12, y, { size: 13, color: cols[0].c ?? base });
+      text(ctx, cols[1].t, x + 132, y, { size: 13, color: cols[1].c ?? base });
+      text(ctx, cols[2].t, x + w - 12, y, { size: 13, color: cols[2].c ?? base, align: 'right' });
     });
   }
 

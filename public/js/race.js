@@ -47,16 +47,20 @@ class DeskRun {
     const end = this.finishedAt ?? now;
     const elapsedMs = this.startedAt === null ? 0 : Math.max(0, end - this.startedAt);
     const correct = this.records.filter((r) => r.correct).length;
+    const falseApprovals = ok.filter((r) => r.decision === 'approve' && r.truth === 'reject').length;
+    const falseRejections = ok.filter((r) => r.decision === 'reject' && r.truth === 'approve').length;
     return {
       done: this.records.length,
       total: this.total,
       approved: ok.filter((r) => r.decision === 'approve').length,
       denied: ok.filter((r) => r.decision === 'reject').length,
+      // Calls that gave no usable answer (timeouts, API errors, unreadable replies). Wrong answers are counted in `wrong`.
       errors: this.records.length - ok.length,
       correct,
       accuracy: this.records.length ? correct / this.records.length : null,
-      falseApprovals: ok.filter((r) => r.decision === 'approve' && r.truth === 'reject').length,
-      falseRejections: ok.filter((r) => r.decision === 'reject' && r.truth === 'approve').length,
+      falseApprovals,
+      falseRejections,
+      wrong: falseApprovals + falseRejections,
       lastMs: latencies.length ? latencies[latencies.length - 1] : null,
       avgMs: latencies.length ? sum(latencies) / latencies.length : null,
       p95Ms: percentile(latencies, 95),

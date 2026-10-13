@@ -330,6 +330,15 @@ function disagreementTable(race) {
   );
 }
 
+/** Why accuracy is below 100%: which way the wrong answers went, and how many calls failed outright. */
+function accuracyBreakdown(row) {
+  const parts = [];
+  if (row.falseApprovals) parts.push(`${row.falseApprovals} wrongly approved`);
+  if (row.falseRejections) parts.push(`${row.falseRejections} wrongly rejected`);
+  if (row.errors) parts.push(`${row.errors} failed`);
+  return parts.length ? el('div', { class: 'muted small' }, parts.join(', ')) : null;
+}
+
 export function renderResults(dialog, { race, config, summary, onRunAgain, onExport, onClose }) {
   const running = race.status !== 'finished';
   const rows = [...summary.rows].sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.desk.id - b.desk.id);
@@ -341,7 +350,7 @@ export function renderResults(dialog, { race, config, summary, onRunAgain, onExp
     el('td', {}, fmtMs(row.avgMs)),
     el('td', {}, fmtMs(row.p95Ms)),
     el('td', {}, row.perMinute ? `${row.perMinute.toFixed(row.perMinute < 100 ? 1 : 0)}/min` : '-'),
-    el('td', {}, `${fmtPercent(row.accuracy)}${row.falseApprovals ? ` (${row.falseApprovals} wrongly approved)` : ''}`),
+    el('td', {}, fmtPercent(row.accuracy), accuracyBreakdown(row)),
     el('td', {}, fmtTokens(row.tokensIn + row.tokensOut)),
     el('td', {}, fmtMoney(row.cost), row.cost !== null && row.done > 0 ? el('div', { class: 'muted small' }, `${fmtMoney((row.cost / row.done) * 1000)} per 1k decisions`) : null),
   ];

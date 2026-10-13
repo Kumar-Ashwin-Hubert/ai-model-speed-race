@@ -83,7 +83,8 @@ test('stats: accuracy, error direction, latency percentiles, tokens and cost', a
   assert.equal(stats.accuracy, 0.75);
   assert.equal(stats.falseApprovals, 1);
   assert.equal(stats.falseRejections, 1);
-  assert.equal(stats.errors, 0);
+  assert.equal(stats.wrong, 2, 'wrong counts the answers that did not match the truth, in both directions');
+  assert.equal(stats.errors, 0, 'wrong answers are not failed calls');
   assert.equal(stats.tokensIn, 800);
   assert.equal(stats.tokensOut, 40);
   assert.ok(Math.abs(stats.cost - (800 / 1e6) * 0.042) < 1e-12);
@@ -148,6 +149,8 @@ test('three failures in a row abort a desk, a success in between resets the coun
   assert.equal(flaky.rank, null);
   assert.match(flaky.note, /3 failures in a row/);
   assert.equal(flaky.stats(race.now()).errors, 5);
+  assert.equal(flaky.stats(race.now()).wrong, 0, 'failed calls are not wrong answers');
+  assert.ok(flaky.stats(race.now()).accuracy < 1, 'but they still count against accuracy');
   assert.equal(race.runs[0].rank, 1);
 });
 
