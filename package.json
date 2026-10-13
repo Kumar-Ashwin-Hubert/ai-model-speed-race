@@ -1,0 +1,17 @@
+{
+  "name": "ai-model-speed-race",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Model Speed Race: a game that races AI models through the same queue of approval decisions to compare speed, accuracy and cost, such as Microsoft Decision 1 and JEV against LLMs on Azure AI Foundry.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "demo": "node server.js --mock",
+    "check": "node scripts/check.js",
+    "test": "node --test"
+  }
+}
