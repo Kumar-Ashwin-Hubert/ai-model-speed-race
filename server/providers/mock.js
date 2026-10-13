@@ -1,4 +1,4 @@
-import { RULE_IDS, makeRng } from '../../shared/rulebook.js';
+import { RULE_IDS, dossierToText, makeRng } from '../../shared/rulebook.js';
 import { decideFromProbabilities } from '../decision.js';
 import { sleep } from '../http.js';
 
@@ -20,8 +20,17 @@ const PROFILES = {
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const SIM_SEEDS = { jev: 1, fast: 2, reasoning: 3, decision1: 4, large: 5 };
 
+/** A stable number for a paper. Content-based, so mistakes land on different applicants from queue to queue (a bare applicant number would repeat them). */
+function keyOf(paper) {
+  if (typeof paper === 'number') return paper;
+  if (!paper?.dossier) return paper?.id ?? 0;
+  let hash = 2166136261; // FNV-1a over the dossier text
+  for (const char of dossierToText(paper.dossier)) hash = Math.imul(hash ^ char.codePointAt(0), 16777619);
+  return hash >>> 0;
+}
+
 /** One random stream per simulated model and paper, so replaying a queue replays the same delays and mistakes. */
-const streamFor = (sim, paperId) => makeRng((SIM_SEEDS[sim] ?? SIM_SEEDS.fast) * 7919 + paperId * 104729);
+const streamFor = (sim, paper) => makeRng((SIM_SEEDS[sim] ?? SIM_SEEDS.fast) * 7919 + keyOf(paper) * 104729);
 
 /** Log-normal around the model's median, kept inside the range seen in the live runs. Always draws two numbers. */
 function drawDelayMs(rng, profile) {
@@ -29,17 +38,28 @@ function drawDelayMs(rng, profile) {
   return clamp(profile.median * Math.exp(profile.sigma * gaussian), profile.min, profile.max);
 }
 
+/** Everything random about one simulated call, drawn from one stream in a fixed order. */
+function plan(sim, paper) {
+  const profile = PROFILES[sim] ?? PROFILES.fast;
+  const rng = streamFor(sim, paper);
+  const delayMs = drawDelayMs(rng, profile);
+  const mistake = rng() >= profile.accuracy;
+  return { profile, rng, delayMs, mistake };
+}
+
 /** How long a simulated model takes on a paper. Exported so tests can check the calibration without waiting. */
-export const simulatedDelayMs = (sim, paperId) => drawDelayMs(streamFor(sim, paperId), PROFILES[sim] ?? PROFILES.fast);
+export const simulatedDelayMs = (sim, paper) => plan(sim, paper).delayMs;
+
+/** Whether a simulated model gets a paper wrong. Exported so tests can check that mistakes spread evenly. */
+export const simulatedMistake = (sim, paper) => plan(sim, paper).mistake;
 
 export async function callMock(desk, paper, { signal } = {}) {
   const sim = desk.sim ?? (desk.kind === 'systemone' ? 'jev' : desk.id === 2 ? 'fast' : 'reasoning');
-  const profile = PROFILES[sim] ?? PROFILES.fast;
-  const rng = streamFor(sim, paper.id);
-  await sleep(drawDelayMs(rng, profile), signal);
+  const { profile, rng, delayMs, mistake } = plan(sim, paper);
+  await sleep(delayMs, signal);
 
   const truth = paper.hint?.truth === 'reject' ? 'reject' : 'approve';
-  const decision = rng() < profile.accuracy ? truth : truth === 'approve' ? 'reject' : 'approve';
+  const decision = mistake ? (truth === 'approve' ? 'reject' : 'approve') : truth;
   const usage = { inputTokens: Math.round(profile.tokensIn * (0.9 + rng() * 0.2)), outputTokens: profile.tokensOut };
 
   if (desk.kind !== 'systemone') {
