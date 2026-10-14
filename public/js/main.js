@@ -360,6 +360,16 @@ function exportResults() {
 
 // ---- Boot --------------------------------------------------------------------------------------
 
+function openIntro() {
+  const dialog = $('intro');
+  if (!dialog.open) dialog.showModal();
+}
+
+function closeIntro() {
+  const dialog = $('intro');
+  if (dialog.open) dialog.close();
+}
+
 function toggleFocus() {
   const on = document.body.classList.toggle('focus');
   const button = $('focusBtn');
@@ -372,6 +382,8 @@ function wire() {
   $('resetBtn').addEventListener('click', resetRace);
   $('resultsBtn').addEventListener('click', openResults);
   $('focusBtn').addEventListener('click', toggleFocus);
+  $('helpBtn').addEventListener('click', openIntro);
+  $('introClose').addEventListener('click', closeIntro);
   for (const tab of document.querySelectorAll('[data-tab]')) tab.addEventListener('click', () => showTab(tab.dataset.tab));
 
   const canvas = $('stage');
@@ -381,12 +393,13 @@ function wire() {
   });
 
   document.addEventListener('keydown', (event) => {
-    if (event.metaKey || event.ctrlKey || event.altKey || event.target.closest?.('input, select, textarea, dialog')) return;
+    if (event.metaKey || event.ctrlKey || event.altKey || document.querySelector('dialog[open]') || event.target.closest?.('input, select, textarea, dialog')) return;
     if (event.key === ' ' && event.target.tagName !== 'BUTTON') {
       event.preventDefault();
       startRace();
     } else if (event.key.toLowerCase() === 'r') resetRace();
     else if (event.key.toLowerCase() === 'f') toggleFocus();
+    else if (event.key.toLowerCase() === 'h') openIntro();
     else if (['1', '2', '3'].includes(event.key)) selectDesk(Number(event.key) - 1);
   });
 
