@@ -1,5 +1,6 @@
 import { FIELDS, RULES, SAMPLE_PAPERS, buildLlmMessages, buildSystemOneQuestions, dossierToText } from '../../shared/rulebook.js';
 import { PRICES_AS_OF, listPriceFor } from '../../shared/pricing.js';
+import { QUEUE_SIZES } from '../../shared/usage.js';
 import { PACE } from './race.js';
 import { DESK_ACCENTS, el, fill, fmtMoney, fmtMs, fmtPercent, fmtPrice, fmtTokenTotal, fmtTokens } from './util.js';
 
@@ -278,24 +279,29 @@ export function renderSetup(container, { config, lineup, settings, locked, onSet
   const select = (name, options, value) =>
     el('select', { name, disabled: locked, onchange: (event) => onSettings({ [name]: name === 'queueSize' ? Number(event.target.value) : event.target.value }) },
       options.map(([optionValue, label]) => el('option', { value: optionValue, selected: String(optionValue) === String(value) }, label)));
+  // KTD9: once live usage control is enabled, the paid diagnostics surface is removed from the public app. An
+  // older server has no `usage` block at all, which must keep today's behavior (the section stays visible).
+  const testAvailable = config.usage?.testAvailable !== false;
 
   fill(container, 
     el('h3', {}, 'Setup'),
     lineupSection({ config, lineup, locked, onLineup, onResetLineup }),
     section(
       'Race settings',
-      el('label', { class: 'field' }, el('span', {}, 'Applicants per desk'), select('queueSize', [[10, '10'], [20, '20'], [30, '30'], [50, '50']], settings.queueSize)),
+      el('label', { class: 'field' }, el('span', {}, 'Applicants per desk'), select('queueSize', QUEUE_SIZES.map((size) => [size, String(size)]), settings.queueSize)),
       el('label', { class: 'field' }, el('span', {}, 'Animation pace'), select('pace', Object.values(PACE).map((p) => [p.id, `${p.label} (${p.stepMs + p.stampMs} ms)`]), settings.pace)),
       el('label', { class: 'field' }, el('span', {}, 'Queue seed'), el('input', { type: 'number', name: 'seed', value: settings.seed, min: 1, max: 999999, disabled: locked, onchange: (event) => onSettings({ seed: Math.max(1, Math.min(999999, Number(event.target.value) || 1)) }) }), el('button', { class: 'btn small', disabled: locked, onclick: onNewSeed }, 'New seed')),
       el('label', { class: 'field check' }, el('input', { type: 'checkbox', checked: settings.sound, onchange: (event) => onSettings({ sound: event.target.checked }) }), el('span', {}, 'Sound effects')),
       muted('The animation overhead is the same for every desk and is shown in the results. Benchmark pace removes it entirely, so only model latency decides the race.'),
     ),
-    section(
-      'Connections',
-      el('button', { class: 'btn', disabled: locked || testState?.running, onclick: onTest }, testState?.running ? 'Testing...' : config.mock ? 'Test simulated desks' : 'Test connections'),
-      muted(config.mock ? 'Mock mode: no real calls are made.' : 'Sends two tiny sample applications through every configured desk using your real keys.'),
-      testResults(testState),
-    ),
+    testAvailable
+      ? section(
+          'Connections',
+          el('button', { class: 'btn', disabled: locked || testState?.running, onclick: onTest }, testState?.running ? 'Testing...' : config.mock ? 'Test simulated desks' : 'Test connections'),
+          muted(config.mock ? 'Mock mode: no real calls are made.' : 'Sends two tiny sample applications through every configured desk using your real keys.'),
+          testResults(testState),
+        )
+      : null,
   );
 }
 

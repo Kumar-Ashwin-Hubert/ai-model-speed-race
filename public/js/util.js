@@ -61,6 +61,19 @@ export function fmtPrice(usd) {
 
 export const fmtPercent = (ratio) => (ratio === null || Number.isNaN(ratio) ? '-' : `${Math.round(ratio * 100)}%`);
 
+const INDIA_TIME_FORMATTER = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+
+/**
+ * A reset/expiry instant, labelled explicitly as India time (not the visitor's local time or server time), with
+ * the machine-readable instant still available on the caller's side for anyone who needs it (R12).
+ */
+export function fmtIndiaTime(iso) {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return `${INDIA_TIME_FORMATTER.format(date)} IST (India time)`;
+}
+
 /** Tiny DOM builder. Strings become text nodes, so model output can never inject markup. */
 export function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);

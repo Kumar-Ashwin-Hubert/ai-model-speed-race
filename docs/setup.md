@@ -6,13 +6,16 @@ How to run the game with simulated models (no keys) or with real ones, and how t
 
 ## Requirements
 
-- **Node.js 20.12 or newer.** Check with `node --version`; download it from <https://nodejs.org>. There is nothing else to install:
-  the game has no dependencies, so there is no `npm install` step.
+- **Node.js 20.12 or newer.** Check with `node --version`; download it from <https://nodejs.org>.
+- **`npm install`**, once, after cloning or pulling. This installs the Azure Tables and Azure Identity SDKs that the
+  server imports at startup (used only when [usage control](#3-run-it-as-a-protected-public-demo) is enabled; local
+  and mock modes still need the packages present, but never call Azure).
 - For real models: a **KodeKey** token (for JEV) and/or a key for an **Azure AI Foundry** resource (for Microsoft Decision 1, GPT, Grok and others).
 
 ## 1. Try it without keys
 
 ```bash
+npm install
 npm run demo
 ```
 
@@ -40,6 +43,128 @@ As with the real thing, a race against the reasoning LLM takes a couple of minut
 If port 3000 is busy, the server says so and uses the next free one; open the URL it prints.
 
 Controls: `Space` start, `R` reset, `1` `2` `3` inspect a desk, `F` focus view (hides the side panel). Click a lane to inspect that desk.
+
+## 3. Run it as a protected public demo
+
+The game has three modes:
+
+| Mode | How to run it | Azure needed | Live connection test |
+| --- | --- | --- | --- |
+| **Local, unprotected** (default) | `npm start` with `HOST=127.0.0.1` (the default) and `USAGE_CONTROL_ENABLED` unset or `false` | No | Yes (`npm run check` and the Setup tab's *Test connections*) |
+| **Mock / demo** | `npm run demo` (or `MOCK_MODE=true`) | No | Yes, always, even if usage control is also enabled |
+| **Protected hosted** | `USAGE_CONTROL_ENABLED=true` with the usage settings below, served publicly | Yes (Azure Table Storage) | No, in the live UI (`/api/test` is removed); `npm run check` still works for operators |
+
+A local unprotected server spends your credits with no login and no limits, so only run it that way where you control who can reach it
+(keep `HOST=127.0.0.1`). To host the game for anyone to use without a login, enable **usage control**: the server itself enforces a daily
+race allowance per anonymous visitor and an app-wide daily ceiling, backed by a shared Azure Table so the limits hold across restarts and
+multiple instances. Visitors are recognized by a signed, `HttpOnly` cookie, not an account; a race that starts receives a short-lived,
+opaque permit that authorizes only that race's preparation and decisions, never the general API.
+
+### Usage control settings (`.env`)
+
+| Variable | Meaning | Default / range |
+| --- | --- | --- |
+| `USAGE_CONTROL_ENABLED` | Turns on every check below. Leave it unset or `false` for local/default use | `false` |
+| `USAGE_DAILY_GLOBAL_RACES` | App-wide race starts allowed per `Asia/Kolkata` day. **Required** (non-negative integer) once enabled; `0` refuses every race, an emergency stop | none; no upper bound |
+| `USAGE_VISITOR_DAILY_LIMIT` | Race starts allowed per anonymous visitor (browser) per `Asia/Kolkata` day. Optional; a change applies from the next race start after the app restarts, up or down | `10`; whole number `1`-`1000` |
+| `USAGE_TABLE_ENDPOINT` | The Azure Table service endpoint, `https://<account>.table.core.windows.net`. **Required** on App Service (authenticated with its managed identity) | none |
+| `USAGE_TABLE_NAME` | The table the daily ledger lives in. Must start with a letter and be 3-63 letters/digits | `RaceUsage` |
+| `USAGE_STORAGE_CONNECTION_STRING` | Local-development-only alternative to `USAGE_TABLE_ENDPOINT` (for example an Azurite connection string). Startup refuses it when App Service environment variables are present. Give local runs their own `USAGE_TABLE_NAME`: every process that shares a table shares its daily counters and its lowest daily cap | none |
+| `USAGE_SIGNING_SECRET` | **Required** stable secret that signs the visitor cookie and the day-scoped hashes stored in the table | none |
+| `USAGE_PERMIT_MINUTES` | How long a race permit stays valid (capped at the next India midnight, whichever is sooner) | `45`; `1`-`180` |
+| `USAGE_STARTS_PER_MINUTE` | Best-effort per-IP race-start burst limiter; a secondary speed bump, never the authority | `6`; `1`-`1000` |
+
+Each anonymous visitor gets `USAGE_VISITOR_DAILY_LIMIT` races (default **10**) per `Asia/Kolkata` calendar day. All counters and permits
+reset at India midnight (`Asia/Kolkata`, no daylight saving), never the server's own timezone.
+
+**The global cap can only be lowered mid-day, never raised.** Each day's table row remembers the *lowest* `USAGE_DAILY_GLOBAL_RACES` any
+running instance has used that day. Restarting or redeploying with a lower cap — including `0`, an emergency stop — takes effect immediately.
+Restarting with a higher cap does not widen the ceiling until the next India day, so a rolling or partial deployment can never accidentally
+raise exposure mid-day. `USAGE_VISITOR_DAILY_LIMIT` is different: it is compared with each visitor's running count on every start, so raising or
+lowering it applies from the next race start after the app restarts (the global cap still bounds everyone combined).
+
+**Sizing the global cap:** the ceiling counts races, not currency. The largest possible race is 50 applicants across 3 desks, 150 logical
+decisions. Each decision retries transient failures up to `MAX_RETRIES` times (capped at 5), so one decision can make up to 6 provider
+attempts, up to **900 provider attempts in the worst case**, plus up to 3 unretried preparation probes (one per distinct model). Multiply
+your cap by this worst case and by the configured models' per-decision price (see [how cost and tokens are measured](#how-cost-and-tokens-are-measured))
+to estimate worst-case daily spend, and keep provider-side quotas and an Azure Cost Management budget alert as backstops, not as the enforcement
+mechanism itself.
+
+### Azure prerequisites (App Service)
+
+These steps use the project's current deployment, the Basic Linux App Service `ai-model-speed-race` in Central India, as the example;
+substitute your own names and region.
+
+1. **Create or reuse a Standard LRS storage account** and the usage table:
+
+   ```bash
+   az storage account create -n <storage-account> -g <resource-group> -l centralindia --sku Standard_LRS --https-only true --min-tls-version TLS1_2
+   az storage table create -n RaceUsage --account-name <storage-account> --auth-mode login
+   ```
+
+2. **Enable the App Service's system-assigned managed identity:**
+
+   ```bash
+   az webapp identity assign -n ai-model-speed-race -g <resource-group>
+   ```
+
+3. **Grant that identity `Storage Table Data Contributor`, scoped to the table only** (not the whole storage account):
+
+   ```bash
+   principalId=$(az webapp identity show -n ai-model-speed-race -g <resource-group> --query principalId -o tsv)
+   scope="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Storage/storageAccounts/<storage-account>/tableServices/default/tables/RaceUsage"
+   az role assignment create --assignee "$principalId" --role "Storage Table Data Contributor" --scope "$scope"
+   ```
+
+   RBAC can take a few minutes to propagate; see [Troubleshooting](troubleshooting.md) if the app reports it cannot reach the table right after this step.
+
+4. **Set the app settings** (no storage key or connection string; the managed identity authenticates):
+
+   ```bash
+   az webapp config appsettings set -n ai-model-speed-race -g <resource-group> --settings \
+     USAGE_CONTROL_ENABLED=true \
+     USAGE_DAILY_GLOBAL_RACES=<your-chosen-cap> \
+     USAGE_TABLE_ENDPOINT=https://<storage-account>.table.core.windows.net \
+     USAGE_TABLE_NAME=RaceUsage \
+     USAGE_SIGNING_SECRET=<a-long-random-secret>
+   ```
+
+### Rollout order
+
+1. Deploy the new code privately (a non-public slot, IP-restricted access, or before DNS/traffic points at it) with `USAGE_CONTROL_ENABLED`
+   still `false`. The server behaves exactly as before.
+2. Provision the storage account, table, managed identity and table-scoped RBAC (above), and confirm the app can reach the table
+   (its startup log; it refuses to start if it cannot).
+3. Set `USAGE_SIGNING_SECRET` and the daily caps, then set `USAGE_CONTROL_ENABLED=true` and restart the app (or swap the slot).
+4. Smoke-test before opening public traffic: a race starts and completes, a repeated start from the same browser is still counted,
+   a direct `POST /api/prepare` or `/api/decide` without a permit is refused, and `GET /api/config` shows `usage.testAvailable: false`.
+5. Only then point public traffic at it.
+
+### Rollback
+
+Usage control is never switched off while the app still answers public, provider-backed routes. If something is wrong, in order:
+
+1. **Lower the effective cap to `0`** (an immediate emergency stop; see "lowered mid-day" above) **or** remove public/provider access
+   (take the app offline, restrict access, or rotate out the provider keys).
+2. Let in-flight races finish naturally or let their permits expire; do not force-disable usage control while they could still reach a provider.
+3. Only then roll back the application version or configuration.
+
+Rotating `USAGE_SIGNING_SECRET` mid-day has the same effect as a partial outage: existing visitor cookies and active permits stop verifying,
+so do that only at India midnight or in a planned maintenance window; the global cap remains the backstop either way.
+
+### Retention and manual cleanup
+
+Each `Asia/Kolkata` day gets its own table partition (`PartitionKey` `YYYYMMDD`) holding the global counter, one row per visitor hash seen that
+day, and one row per race. Visitor hashes are day-scoped (not linkable across days) and no raw IP address, cookie value or permit is ever
+stored, but partitions are not deleted automatically yet. Until automated retention is added, periodically delete old partitions yourself,
+for example with a short script using `@azure/data-tables` (`listEntities({ queryOptions: { filter: "PartitionKey lt 'YYYYMMDD'" } })` then
+`deleteEntity`) or the Azure Storage Explorer, keeping only the window you need for support and auditing (for example 30-90 days).
+
+### Cost Management alert
+
+Set an [Azure Cost Management budget alert](https://learn.microsoft.com/en-us/azure/cost-management-billing/costs/tutorial-acm-create-budgets)
+on the resource group as a final alarm for spend outside this app's control (for example a provider price change, or a cap set too high) --
+not as the primary enforcement mechanism, which is the daily race cap above.
 
 ## Choosing the models at the desks
 
@@ -82,8 +207,9 @@ The older `DESK1_*`, `DESK2_*`, `DESK3_*` variables (same suffixes) are still re
 | `KODEKEY_BASE_URL`, `KODEKEY_API_KEY` | KodeKey gateway (an OpenAI-format LiteLLM proxy) and your token |
 | `KODEKEY_JEV_PATH` | Only for `MODE=systemone` on KodeKey: the native route (default `/systemone`) |
 | `FOUNDRY_ENDPOINT`, `FOUNDRY_API_KEY` | Foundry **resource** endpoint (`https://<resource>.services.ai.azure.com`) and its key |
-| `REQUEST_TIMEOUT_MS`, `MAX_RETRIES` | Per-request timeout (60 s) and retries for 429 / 5xx / network errors (2) |
-| `PORT`, `HOST`, `MOCK_MODE` | Server options. `HOST` defaults to `127.0.0.1`; keep it that way, the API spends your credits |
+| `REQUEST_TIMEOUT_MS`, `MAX_RETRIES` | Per-request timeout (60 s) and retries for 429 / 5xx / network errors (2, up to 5) |
+| `PORT`, `HOST`, `MOCK_MODE` | Server options. `HOST` defaults to `127.0.0.1`; keep it that way unless [usage control](#3-run-it-as-a-protected-public-demo) is enabled, since the API otherwise spends your credits with no login |
+| `USAGE_*` | Anonymous-visitor and app-wide daily race limits for a public deployment; see [Run it as a protected public demo](#3-run-it-as-a-protected-public-demo) |
 
 ### How JEV is reached through KodeKey
 

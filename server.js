@@ -5,6 +5,8 @@ import { createApp } from './server/app.js';
 import { loadConfig } from './server/config.js';
 import { loadEnv } from './server/env.js';
 import { createRuntime } from './server/runtime.js';
+import { createUsageStore } from './server/usage-store.js';
+import { createUsageService } from './server/usage.js';
 
 const MAX_PORT_ATTEMPTS = 10;
 
@@ -30,6 +32,7 @@ function printBanner(config, port) {
   const shownHost = config.host === '0.0.0.0' ? 'localhost' : config.host;
   console.log(`\n  AI MODEL SPEED RACE  ->  http://${shownHost}:${port}\n`);
   if (config.mock) console.log('  MOCK MODE: models are SIMULATED, no API calls are made.\n');
+  if (config.usage.enabled) console.log(`  USAGE CONTROL: on, ${config.usage.visitorDailyLimit} races/visitor/day, global cap ${config.usage.dailyGlobalRaces}/day (Asia/Kolkata).\n`);
   for (const desk of config.desks) {
     const status = desk.configured ? (config.mock ? 'simulated' : 'ready') : `NOT READY, set ${desk.missing.join(', ')}`;
     const via = desk.kind === 'systemone' ? `system one/${desk.mode}` : desk.api;
@@ -46,7 +49,19 @@ async function main() {
   loadEnv();
   const config = loadConfig(process.env, { mock: process.argv.includes('--mock') });
   const runtime = createRuntime(config);
-  const server = http.createServer(createApp(config, runtime));
+
+  // Usage control stays off (and Azure-free) unless explicitly enabled (KTD10). When enabled, the table
+  // must be reachable before the server ever accepts traffic (KTD7: no false-safe deployment).
+  let usage = null;
+  if (config.usage.enabled) {
+    const store = createUsageStore(config.usage);
+    await store.init();
+    // Only allowlisted fields ever reach this sink (server/usage.js), so upstream provider failures (which
+    // runtime.js reports in the response body, not via this logger) stay distinguishable from quota/storage events.
+    usage = createUsageService(config.usage, { store, log: (fields) => console.log('usage:', JSON.stringify(fields)) });
+  }
+
+  const server = http.createServer(createApp(config, runtime, usage));
   const port = await listen(server, config.host, config.port);
   printBanner(config, port);
 }

@@ -14,10 +14,19 @@ export const PACE = Object.freeze({
 const MAX_CONSECUTIVE_FAILURES = 3;
 const FATAL_STATUS = new Set([401, 403, 404]);
 const FATAL_CODES = new Set(['not_configured', 'unknown_desk', 'unsupported']);
+// Error Contract codes meaning the whole race's authority is gone, not just this one desk's call (KTD4, KTD6).
+const PERMIT_REVOKED_CODES = new Set(['race_permit_required', 'race_permit_invalid', 'usage_control_unavailable']);
 
 const isFatal = (result) => FATAL_STATUS.has(result?.status) || FATAL_CODES.has(result?.code);
+const isPermitRevoked = (result) => PERMIT_REVOKED_CODES.has(result?.code);
 const sum = (values) => values.reduce((total, value) => total + value, 0);
 const known = (value) => value !== null && value !== undefined;
+
+/** A short, opaque, transport-safe id: one per deliberate Start (a run id) or per prepare/decide call (an operation id). */
+function genId(prefix) {
+  const random = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${random}`;
+}
 
 /** What one call cost: the server's figure, or (from a server that predates it) its tokens at the desk's configured price. */
 function callCost(record, desk) {
@@ -97,16 +106,20 @@ class DeskRun {
 export class Race {
   /**
    * @param {object} options
-   * @param {object[]} options.desks   public desk config from the server
-   * @param {object[]} options.papers  the queue every desk works through (same order for fairness)
-   * @param {Function} options.decide  ({deskId, paper, signal}) => Promise<server result>
-   * @param {Function} options.prepare ({signal}) => Promise<[{deskId, ok, error?}]>
+   * @param {object[]} options.desks      public desk config from the server
+   * @param {object[]} options.papers     the queue every desk works through (same order for fairness)
+   * @param {Function} options.decide     ({deskId, paper, signal, permit, operationId}) => Promise<server result>
+   * @param {Function} options.prepare    ({signal, permit, operationId}) => Promise<[{deskId, ok, error?}]>
+   * @param {Function} [options.authorize] ({runId, queueSize, profiles, signal}) => Promise<{ok, permit, resetAt, expiresAt} | {ok: false, code, error, resetAt, retryAfterMs}>
+   *   Omit entirely to preserve current behaviour (mock mode, or usage control disabled): the race then
+   *   skips straight to warming, exactly as before this authorization step existed.
    */
-  constructor({ desks, papers, decide, prepare, pace = 'standard', now = () => performance.now(), onEvent = () => {} }) {
+  constructor({ desks, papers, decide, prepare, authorize = null, pace = 'standard', now = () => performance.now(), onEvent = () => {} }) {
     this.desks = desks;
     this.papers = papers;
     this.decideFn = decide;
     this.prepareFn = prepare;
+    this.authorizeFn = authorize;
     this.pace = PACE[pace] ?? PACE.standard;
     this.now = now;
     this.onEvent = onEvent;
@@ -135,6 +148,10 @@ export class Race {
     this.startedAt = null;
     this.finishedAt = null;
     this.finishedCount = 0;
+    // A permit is only ever good for the race that earned it (R3): reset/rebuild always drops it, never reuses it.
+    this.runId = null;
+    this.permit = null;
+    this.permitRevoked = null;
     this.runs = this.desks.map((desk) => new DeskRun(desk, this.papers));
     this.emit('status');
   }
@@ -149,17 +166,54 @@ export class Race {
     return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
   }
 
-  /** Warms the connections, then starts every ready desk at the same instant. */
+  /** Requests race authority (if required), warms the connections, then starts every ready desk at the same instant. */
   async start() {
     if (this.status !== 'ready') return { started: false, reason: 'The race is already running. Reset it first.' };
     const token = { cancelled: false, controller: new AbortController() };
     this.token = token;
+    // One run id per deliberate Start/Run again action (KTD11): every prepare/decide operation id below is derived from it.
+    this.runId = genId('run');
+    this.permit = null;
+    this.permitRevoked = null;
+
+    if (this.authorizeFn) {
+      this.status = 'authorizing';
+      this.emit('status');
+      let auth;
+      try {
+        auth = await this.authorizeFn({
+          runId: this.runId,
+          queueSize: this.papers.length,
+          profiles: this.desks.map((desk) => desk.profile),
+          signal: token.controller.signal,
+        });
+      } catch {
+        auth = { ok: false, code: 'usage_control_unavailable', error: 'Could not reach the game server to authorize this race.' };
+      }
+      // Reset/rebuild during authorization cancels this token; a late success (or failure) must never resurrect it.
+      if (token.cancelled) return { started: false, cancelled: true };
+      if (!auth?.ok) {
+        // Leave the race ready so a transient refusal (storage, burst) can simply be retried (R12).
+        this.status = 'ready';
+        this.emit('status');
+        return {
+          started: false,
+          authFailure: true,
+          code: auth?.code ?? 'usage_control_unavailable',
+          reason: auth?.error ?? 'Could not authorize this race.',
+          resetAt: auth?.resetAt ?? null,
+          retryAfterMs: auth?.retryAfterMs ?? null,
+        };
+      }
+      this.permit = auth.permit ?? null;
+    }
+
     this.status = 'warming';
     this.emit('status');
 
     let report;
     try {
-      report = await this.prepareFn({ signal: token.controller.signal });
+      report = await this.prepareFn({ signal: token.controller.signal, permit: this.permit, operationId: `${this.runId}:prepare` });
     } catch (error) {
       report = this.runs.map((run) => ({ deskId: run.meta.id, ok: false, error: 'Cannot reach the game server.' }));
     }
@@ -188,7 +242,8 @@ export class Race {
     this.status = 'finished';
     this.emit('status');
     this.emit('done');
-    return { started: true };
+    // Completed records stay on the runs (preserved) even when a mid-race permit failure cut the race short.
+    return { started: true, ...(this.permitRevoked ? { permitRevoked: this.permitRevoked } : {}) };
   }
 
   record(paper, result) {
@@ -215,15 +270,26 @@ export class Race {
 
   async runDesk(run, token) {
     run.startedAt = this.startedAt;
-    while (!token.cancelled && run.queue.length > 0) {
+    while (!token.cancelled && !this.permitRevoked && run.queue.length > 0) {
       const paper = run.queue[0];
       this.setPhase(run, 'stepping');
       await this.wait(this.pace.stepMs);
       if (token.cancelled) return;
+      if (this.permitRevoked) return this.abortRun(run, this.permitRevoked.message);
 
       this.setPhase(run, 'reviewing');
-      const result = await this.decideFn({ deskId: run.meta.id, paper, signal: token.controller.signal });
+      const operationId = `${this.runId}:${run.meta.id}:${paper.id}`;
+      const result = await this.decideFn({ deskId: run.meta.id, paper, signal: token.controller.signal, permit: this.permit, operationId });
       if (token.cancelled) return;
+      // Another desk's call (or this one) just found the permit dead: stop every desk, not only this one (R3).
+      if (this.permitRevoked) return this.abortRun(run, this.permitRevoked.message);
+      if (!result?.ok && isPermitRevoked(result)) {
+        this.permit = null;
+        this.permitRevoked = { code: result.code, message: result.error ?? 'Race authorization was revoked; start a new race.' };
+        token.controller.abort();
+        this.emit('auth-revoked', this.permitRevoked);
+        return this.abortRun(run, this.permitRevoked.message);
+      }
       if (!result?.ok && isFatal(result)) return this.abortRun(run, result?.error ?? 'Desk cannot work');
 
       const record = this.record(paper, result);
@@ -232,6 +298,7 @@ export class Race {
       this.emit('decision', { run, paper, record });
       await this.wait(this.pace.stampMs);
       if (token.cancelled) return;
+      if (this.permitRevoked) return this.abortRun(run, this.permitRevoked.message);
 
       run.queue.shift();
       run.leaving.push({ paper, record, at: this.now() });
@@ -240,8 +307,10 @@ export class Race {
       run.failures = record.ok ? 0 : run.failures + 1;
       if (run.failures >= MAX_CONSECUTIVE_FAILURES) return this.abortRun(run, `${MAX_CONSECUTIVE_FAILURES} failures in a row: ${record.error}`);
     }
+    if (this.permitRevoked) return this.abortRun(run, this.permitRevoked.message);
     this.finishRun(run);
   }
+
 
   finishRun(run) {
     if (!run.records.some((record) => record.ok)) return this.abortRun(run, 'Every request failed');

@@ -23,10 +23,11 @@ every extra second per decision makes the queue longer and the bill bigger. The 
 ```bash
 git clone https://github.com/Kumar-Ashwin-Hubert/ai-model-speed-race.git
 cd ai-model-speed-race
+npm install
 npm run demo
 ```
 
-Open <http://127.0.0.1:3000> and press **Start shift**. You need [Node.js](https://nodejs.org) 20.12 or newer; there is nothing to install.
+Open <http://127.0.0.1:3000> and press **Start shift**. You need [Node.js](https://nodejs.org) 20.12 or newer, and a one-time `npm install`.
 
 > **Demo mode is a simulation.** The models are simulated, with delays modelled on the live runs below, and it says **SIMULATED** everywhere. It shows how the game works; it is not a measurement.
 > For real numbers, race the real models.
@@ -39,6 +40,8 @@ You need a KodeKey token (for JEV) and a key for an Azure AI Foundry resource (f
 2. Run `npm run check` to test every connection with real calls.
 3. Run `npm start` and press **Start shift**.
 
+By default the server only listens on your own machine. Hosting it for other people to use is also supported, with server-enforced daily race limits so costs stay bounded; see [running a protected public demo](docs/setup.md#3-run-it-as-a-protected-public-demo).
+
 Your keys stay in `.env` on your machine; the page never sees them. The full walkthrough is in **[Setup and configuration](docs/setup.md)**.
 A 20-applicant race makes about 60 small requests. In our runs 20 decisions cost about $0.0004 with JEV, $0.0002 with Decision 1 and $0.002 with GPT-4.1 mini.
 A reasoning model costs much more per decision, because its reasoning tokens are billed as output.
@@ -46,26 +49,27 @@ Tokens come from each response, and cost from the provider's own figure or a bui
 
 ## What we measured
 
-Three real races on 13 October 2026, all on the same queue ([seed 2026](docs/how-it-works.md#queue-seed), 20 applicants per desk, default pace).
+Three real races on 13 and 14 October 2026 (the reasoning-model race is from 14 October), all on the same queue ([seed 2026](docs/how-it-works.md#queue-seed), 20 applicants per desk, default pace).
 In each one Decision 1 and JEV raced a different rival at the third desk, from a small fast LLM up to a reasoning model.
 
 | Rival at the third desk | Rival's average decision | Decision 1 | JEV |
 | --- | --- | --- | --- |
 | GPT-4.1 mini (small, fast LLM) | 885 ms | 574 ms, **1.5x** faster | 680 ms, **1.3x** faster |
 | GPT-4.1 (large general-purpose LLM) | 1.32 s | 493 ms, **2.7x** faster | 657 ms, **2.0x** faster |
-| Grok 4.7 (reasoning LLM, default settings) | 6.07 s | 556 ms, **10.9x** faster | 477 ms, **12.7x** faster |
+| Grok 4.7 (reasoning LLM, default settings) | 8.20 s | 476 ms, **17.2x** faster | 513 ms, **16.0x** faster |
 
 Every desk got every applicant right in every race, so the extra size and extra thinking bought no accuracy on this task. What it cost is time:
 **the more a model deliberates, the bigger the gap.**
 
-![After 21 seconds JEV and Decision 1 have cleared all 20 applicants while Grok 4.7 has handled 3](docs/images/vs-reasoning-in-progress.png)
+![After 17 seconds Decision 1 and JEV have cleared all 20 applicants while Grok 4.7 has handled 2](docs/images/vs-reasoning-in-progress.png)
 
-*The reasoning-model race after 21 seconds: JEV and Decision 1 have cleared their queues; Grok 4.7 has handled 3 applicants.*
+*The reasoning-model race after 17 seconds: Decision 1 and JEV have cleared their queues; Grok 4.7 has handled 2 applicants.*
 
-![The shift report: JEV 14.6 s, Decision 1 16.1 s, Grok 4.7 2 min 6 s, all 100% accurate](docs/images/vs-reasoning-report.png)
+![The shift report: Decision 1 14.5 s, JEV 15.3 s, Grok 4.7 2 min 49 s, all 100% accurate](docs/images/vs-reasoning-report.png)
 
-JEV cleared the queue in 14.6 s and Decision 1 in 16.1 s. Grok 4.7 needed 2 minutes 6 seconds for the same decisions, about 6 s each. It reasons in text before it answers
-(around 330 tokens per decision), while a decision model scores all six rules in one parallel pass.
+Decision 1 cleared the queue in 14.5 s and JEV in 15.3 s. Grok 4.7 needed 2 minutes 49 seconds for the same decisions, about 8 s each. It reasons in text before it answers
+(around 330 tokens per decision), while a decision model scores all six rules in one parallel pass. Decision 1 and JEV finish within a couple of seconds of each other,
+so either can be first on a given run; both stay far ahead of Grok 4.7.
 *Cleared in* includes a fixed 230 ms of animation per applicant for every desk, so it understates the gap; *average decision* is pure model time.
 
 <details>
@@ -121,7 +125,7 @@ about 1.3x to 1.5x against a small LLM, 2x to 2.7x against a large one and 11x t
 
 **Why "Checkpoint One"?** It is the in-game name of the border post where the race takes place.
 
-**Is it safe to run?** The server listens on your machine only, keeps your keys to itself and ignores any URL or key a page sends. See [How it works](docs/how-it-works.md#security-notes).
+**Is it safe to run?** By default the server listens on your machine only, keeps your keys to itself and ignores any URL or key a page sends. It can also be hosted publicly without a login, with server-enforced daily race limits so anonymous usage can't run up an unbounded bill; see [How it works](docs/how-it-works.md#security-notes) and [running a protected public demo](docs/setup.md#3-run-it-as-a-protected-public-demo).
 
 **Something broke.** See [Troubleshooting](docs/troubleshooting.md).
 

@@ -73,11 +73,11 @@ so you can replay a queue and compare runs fairly. A different seed, or a differ
 
 ```
 server.js            entry point (static files + /api)
-server/              config, HTTP helpers, runtime and providers (llm, jev, mock)
+server/              config, HTTP helpers, runtime and providers (llm, jev, mock), usage control (usage.js, usage-store.js)
 shared/rulebook.js   rules, applications generator, prompts; used by the server and the browser
 public/              the game: canvas renderer, race engine, UI, audio
 scripts/check.js     npm run check
-test/                node --test (rulebook, config, providers, line-up, HTTP app, race engine)
+test/                node --test (rulebook, config, providers, line-up, HTTP app, race engine, usage control)
 docs/                this documentation
 ```
 
@@ -90,4 +90,7 @@ docs/                this documentation
 - The server listens on `127.0.0.1`, answers only same-origin API calls and loopback `Host` headers, requires JSON bodies and caps their size.
 - Ground truth is never sent to a model. Only the application fields are forwarded.
 - Do not commit `.env`. It is listed in `.gitignore`.
-- The API spends your credits and has no login, so do not expose the server to a network (keep `HOST=127.0.0.1`).
+- The API spends your credits and has no login. By default, keep `HOST=127.0.0.1` so it is reachable only from your own machine.
+  It can also be hosted publicly without a login by enabling **usage control**, which adds server-enforced per-visitor and
+  app-wide daily race caps backed by Azure Table Storage; see [Setup: protected hosted mode](setup.md#3-run-it-as-a-protected-public-demo).
+  Never make the server reachable from a network with usage control disabled.

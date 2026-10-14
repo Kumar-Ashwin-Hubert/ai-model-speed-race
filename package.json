@@ -13,5 +13,9 @@
     "demo": "node server.js --mock",
     "check": "node scripts/check.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.3.2",
+    "@azure/identity": "^4.14.0"
   }
 }

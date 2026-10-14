@@ -1,8 +1,10 @@
 import { generatePapers } from '../../shared/rulebook.js';
+import { DEFAULT_VISITOR_DAILY_LIMIT, QUEUE_SIZES, RACE_PERMIT_HEADER } from '../../shared/usage.js';
 import { createAudio } from './audio.js';
 import { PACE, Race } from './race.js';
 import { Renderer } from './renderer.js';
 import { renderAbout, renderCaseFile, renderResults, renderRulebook, renderSetup } from './ui.js';
+import { fmtIndiaTime } from './util.js';
 
 const $ = (id) => document.getElementById(id);
 const JSON_HEADERS = { 'content-type': 'application/json' };
@@ -16,7 +18,7 @@ function loadSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}');
     return {
-      queueSize: [10, 20, 30, 50].includes(saved.queueSize) ? saved.queueSize : defaults.queueSize,
+      queueSize: QUEUE_SIZES.includes(saved.queueSize) ? saved.queueSize : defaults.queueSize,
       pace: PACE[saved.pace] ? saved.pace : defaults.pace,
       sound: Boolean(saved.sound),
     };
@@ -33,6 +35,9 @@ const state = {
   selectedDesk: 0,
   tab: 'case',
   testState: null,
+  // A persistent, accessible refusal/service notice (visitor/global/burst/unavailable): shown through #statusText,
+  // not only a fading toast, and not distinguished by color alone (R12).
+  raceNotice: null,
 };
 
 const audio = createAudio();
@@ -102,8 +107,40 @@ function syncRaceDesks() {
 /** The line-up the current race was built with, as the server wants it. Empty for an older server. */
 const lineupBody = () => (state.config.catalog && state.race ? { profiles: state.race.desks.map((desk) => desk.profile) } : {});
 
-async function prepare({ signal }) {
-  const response = await fetch('/api/prepare', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(lineupBody()), signal });
+/** The permit, if any, travels only in this dedicated header -- never a cookie, query string, or URL (R8, R9). */
+const permitHeaders = (permit) => (permit ? { [RACE_PERMIT_HEADER]: permit } : {});
+
+/** Parses the server's Error Contract body `{ error, code, resetAt? }` plus any `Retry-After`, for a failed response. */
+async function parseApiFailure(response) {
+  const json = await response.json().catch(() => null);
+  const retryAfterHeader = response.headers.get('retry-after');
+  return {
+    code: json?.code ?? 'http',
+    error: json?.error ?? `HTTP ${response.status}`,
+    resetAt: json?.resetAt ?? null,
+    retryAfterMs: retryAfterHeader ? Number(retryAfterHeader) * 1000 : null,
+  };
+}
+
+/** Requests one race permit for a deliberate Start/Run again action (R1-R3); a no-op server answers `{enabled:false}`. */
+async function authorizeRace({ runId, queueSize, profiles, signal }) {
+  const body = { runId, queueSize, ...(state.config.catalog ? { profiles } : {}) };
+  let response;
+  try {
+    response = await fetch('/api/races/start', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body), signal });
+  } catch (error) {
+    if (signal?.aborted) return { ok: false, code: 'cancelled', error: 'Cancelled' };
+    return { ok: false, code: 'usage_control_unavailable', error: `Cannot reach the game server: ${error.message}` };
+  }
+  if (!response.ok) return { ok: false, ...(await parseApiFailure(response)) };
+  const json = await response.json();
+  return { ok: true, permit: json.permit ?? null, resetAt: json.resetAt ?? null, expiresAt: json.expiresAt ?? null };
+}
+
+async function prepare({ signal, permit, operationId }) {
+  const body = { ...lineupBody(), ...(operationId ? { operationId } : {}) };
+  const headers = { ...JSON_HEADERS, ...permitHeaders(permit) };
+  const response = await fetch('/api/prepare', { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const { desks } = await response.json();
   for (const entry of desks) {
@@ -114,16 +151,19 @@ async function prepare({ signal }) {
   return desks;
 }
 
-async function decide({ deskId, paper, signal }) {
+async function decide({ deskId, paper, signal, permit, operationId }) {
   const profile = state.config.catalog ? state.race.desks.find((desk) => desk.id === deskId)?.profile : undefined;
-  const body = { deskId, ...(profile ? { profile } : {}), paper: { id: paper.id, dossier: paper.dossier } };
+  const body = { deskId, ...(profile ? { profile } : {}), paper: { id: paper.id, dossier: paper.dossier }, ...(operationId ? { operationId } : {}) };
   // Ground truth is only ever sent to the local server in simulation mode, where nothing leaves the machine.
   if (state.config.mock) body.paper.hint = { truth: paper.truth, violations: paper.violations };
+  const headers = { ...JSON_HEADERS, ...permitHeaders(permit) };
   try {
-    const response = await fetch('/api/decide', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body), signal });
+    const response = await fetch('/api/decide', { method: 'POST', headers, body: JSON.stringify(body), signal });
     const json = await response.json().catch(() => null);
     if (!json) return { ok: false, code: 'server', status: response.status, error: `Game server answered HTTP ${response.status}` };
-    if (json.ok === undefined) return { ok: false, code: 'http', status: response.status, error: json.error ?? `HTTP ${response.status}` };
+    // A structured Error Contract failure (e.g. race_permit_invalid, usage_control_unavailable) carries its own code;
+    // an older/unrelated HTTP error falls back to the generic "http" code, as before.
+    if (json.ok === undefined) return { ok: false, code: json.code ?? 'http', status: response.status, error: json.error ?? `HTTP ${response.status}`, resetAt: json.resetAt ?? null };
     return json;
   } catch (error) {
     if (signal?.aborted) return { ok: false, code: 'cancelled', error: 'Cancelled' };
@@ -148,10 +188,52 @@ async function refreshConfig() {
 
 // ---- Race lifecycle ----------------------------------------------------------------------------
 
+/** How many races this visitor gets per India day, from public config; falls back to the default (R1). */
+const visitorDailyLimit = () => state.config?.usage?.visitorDailyLimit ?? DEFAULT_VISITOR_DAILY_LIMIT;
+
+/**
+ * Turns one structured Start refusal into a persistent, accessible message (R11, R12): visitor/global/burst/
+ * unavailable each read distinctly, the India reset time is explicit, and nothing here depends on color alone.
+ */
+function authNoticeFor(result) {
+  const resetText = fmtIndiaTime(result.resetAt);
+  const retrySeconds = result.retryAfterMs ? Math.max(1, Math.ceil(result.retryAfterMs / 1000)) : null;
+  // The raw ISO instant travels with the notice too (as a `title`, in updateToolbar) so a machine-readable
+  // absolute timestamp survives alongside the human-readable India-time label (R12).
+  const base = { resetAt: result.resetAt ?? null, kind: 'bad' };
+  switch (result.code) {
+    case 'visitor_daily_limit':
+      return { ...base, text: `Daily limit reached: you have used all ${visitorDailyLimit()} races today.${resetText ? ` Your allowance resets ${resetText}.` : ''}` };
+    case 'global_daily_limit':
+      return { ...base, text: `This public demo has reached today's shared capacity.${resetText ? ` Capacity resets ${resetText}.` : ''} Please try again after that.` };
+    case 'start_rate_limit':
+      return { ...base, text: `Too many race starts from this connection.${retrySeconds ? ` Try again in about ${retrySeconds}s.` : ' Try again shortly.'}` };
+    case 'usage_control_unavailable':
+      return { ...base, text: 'Race setup is temporarily unavailable (a service problem, not a daily limit). Please try again shortly.' };
+    default:
+      return { ...base, text: result.reason || 'Could not start the race. Please try again.' };
+  }
+}
+
+/** Sets/clears the persistent notice shown through #statusText (not only a toast) until the next Start attempt. */
+function setRaceNotice(notice) {
+  state.raceNotice = notice;
+  updateToolbar();
+}
+
+function clearRaceNotice() {
+  if (!state.raceNotice) return;
+  state.raceNotice = null;
+  updateToolbar();
+}
+
 function buildRace() {
   state.race?.reset();
+  clearRaceNotice();
   const papers = generatePapers(state.settings.seed, state.settings.queueSize);
-  state.race = new Race({ desks: lineupDesks(), papers, decide, prepare, pace: state.settings.pace, onEvent });
+  // Usage control gates Start itself (R2, R3); mock and unprotected local mode omit `authorize` to keep today's behavior.
+  const authorize = state.config.usage?.enabled ? authorizeRace : undefined;
+  state.race = new Race({ desks: lineupDesks(), papers, decide, prepare, authorize, pace: state.settings.pace, onEvent });
   renderer?.resetVisuals();
   updateToolbar();
   renderTab();
@@ -160,13 +242,22 @@ function buildRace() {
 async function startRace() {
   if (!state.race || state.race.status !== 'ready') return;
   audio.setEnabled(state.settings.sound);
+  clearRaceNotice();
   const result = await state.race.start();
-  if (!result.started && result.reason) toast(result.reason, 'bad', 9000);
+  if (!result.started) {
+    if (result.authFailure) setRaceNotice(authNoticeFor(result));
+    else if (result.reason) toast(result.reason, 'bad', 9000);
+  } else if (result.permitRevoked) {
+    // Mid-race permit loss (KTD4): the race already finished (its completed records are preserved); a new Start
+    // will request a fresh permit, so the persistent notice says so instead of implying this one can be resumed.
+    setRaceNotice({ kind: 'bad', text: `Race authorization was lost mid-race: ${result.permitRevoked.message} Completed results are kept below; start a new race to continue.` });
+  }
 }
 
 function resetRace() {
   if (!state.race || state.race.status === 'ready') return;
   closeResults();
+  clearRaceNotice();
   state.race.reset();
   renderTab();
 }
@@ -196,6 +287,7 @@ function onEvent(type, data = {}) {
 
 const STATUS_TEXT = {
   ready: 'Ready. All three desks get the identical queue.',
+  authorizing: 'Requesting authorization to start this race...',
   warming: 'Briefing the approvers: opening connections (not timed)...',
   running: 'Shift in progress. Click a lane to inspect that desk.',
   finished: 'Shift complete.',
@@ -208,11 +300,23 @@ function updateToolbar() {
   $('resetBtn').disabled = race.status === 'ready';
   $('resultsBtn').disabled = !race.runs.some((run) => run.records.length > 0);
   const anyReady = race.runs.some((run) => run.phase !== 'offline');
-  $('statusText').textContent = anyReady || state.config.mock ? STATUS_TEXT[race.status] : 'No desk is configured yet. Paste your keys into .env and restart the server, or run "npm run demo".';
+  const statusNode = $('statusText');
+  // A visitor/global/burst/unavailable refusal is shown here persistently while ready (not only as a fading toast,
+  // and not by color alone): it replaces the normal "Ready." text until the next Start attempt clears it (R12).
+  if (state.raceNotice && race.status === 'ready') {
+    statusNode.textContent = state.raceNotice.text;
+    statusNode.classList.toggle('bad', state.raceNotice.kind === 'bad');
+    // The India-time label is human-readable; the exact machine-readable instant is kept available here too.
+    statusNode.title = state.raceNotice.resetAt ?? '';
+  } else {
+    statusNode.classList.remove('bad');
+    statusNode.title = '';
+    statusNode.textContent = anyReady || state.config.mock ? STATUS_TEXT[race.status] : 'No desk is configured yet. Paste your keys into .env and restart the server, or run "npm run demo".';
+  }
 }
 
 function raceLocked() {
-  return state.race.status === 'warming' || state.race.status === 'running';
+  return state.race.status === 'authorizing' || state.race.status === 'warming' || state.race.status === 'running';
 }
 
 function scheduleCasefile() {
@@ -275,6 +379,9 @@ function changeSettings(patch) {
 }
 
 async function testConnections() {
+  // Defence in depth: the button is already hidden when live usage control is enabled (ui.js), and the route
+  // itself answers 404 (KTD9); this just avoids firing a request the server will refuse anyway.
+  if (state.config.usage?.testAvailable === false) return;
   state.testState = { running: true };
   renderTab();
   try {
@@ -368,6 +475,8 @@ function toggleFocus() {
 }
 
 function wire() {
+  // Associates the persistent #statusText live region with the control it refuses/limits, for assistive tech (R12).
+  $('startBtn').setAttribute('aria-describedby', 'statusText');
   $('startBtn').addEventListener('click', startRace);
   $('resetBtn').addEventListener('click', resetRace);
   $('resultsBtn').addEventListener('click', openResults);

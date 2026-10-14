@@ -1,5 +1,61 @@
 import http from 'node:http';
 import { RULE_IDS } from '../shared/rulebook.js';
+import { createApp } from '../server/app.js';
+
+/** Starts the application on an ephemeral loopback port for an integration test. */
+export async function withApp(config, runtime, usageOrFn, maybeFn) {
+  const usage = typeof usageOrFn === 'function' ? null : usageOrFn;
+  const fn = typeof usageOrFn === 'function' ? usageOrFn : maybeFn;
+  const server = http.createServer(createApp(config, runtime, usage));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fn(base, server.address().port);
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+export const post = (url, body, headers = {}) =>
+  fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+
+/** In-memory Azure Table stand-in with atomic transaction commits and optimistic concurrency. */
+export function createFakeStore() {
+  const rows = new Map();
+  const keyOf = (pk, rk) => `${pk}\u0000${rk}`;
+  let etagSeq = 0;
+  const conflict = (message) => Object.assign(new Error(message), { code: 'conflict' });
+
+  return {
+    rows,
+    async getEntity(pk, rk) {
+      await Promise.resolve();
+      const row = rows.get(keyOf(pk, rk));
+      return row ? { ...row } : null;
+    },
+    async createEntity(entity) {
+      const key = keyOf(entity.partitionKey, entity.rowKey);
+      if (rows.has(key)) throw conflict('already exists');
+      rows.set(key, { ...entity, etag: `W/"${++etagSeq}"` });
+    },
+    async replaceEntity(entity, etag) {
+      const key = keyOf(entity.partitionKey, entity.rowKey);
+      const current = rows.get(key);
+      if (!current || current.etag !== etag) throw conflict('etag mismatch');
+      rows.set(key, { ...entity, etag: `W/"${++etagSeq}"` });
+    },
+    async submitTransaction(actions) {
+      for (const [kind, entity, , options] of actions) {
+        const key = keyOf(entity.partitionKey, entity.rowKey);
+        const current = rows.get(key);
+        if (kind === 'create' && current) throw conflict('already exists');
+        if (kind === 'update' && (!current || current.etag !== options?.etag)) throw conflict('etag mismatch');
+      }
+      for (const [, entity] of actions) rows.set(keyOf(entity.partitionKey, entity.rowKey), { ...entity, etag: `W/"${++etagSeq}"` });
+    },
+  };
+}
 
 /**
  * Starts a throwaway upstream HTTP server. `handler(call, n)` returns

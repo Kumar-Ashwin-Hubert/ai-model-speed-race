@@ -1,11 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
-import { createApp } from '../server/app.js';
 import { loadConfig, publicConfig } from '../server/config.js';
 import { createRuntime } from '../server/runtime.js';
+import { createUsageService } from '../server/usage.js';
 import { SAMPLE_PAPERS } from '../shared/rulebook.js';
-import { chatReply, responsesReply, startStub } from './helpers.js';
+import { chatReply, createFakeStore, post, responsesReply, startStub, withApp } from './helpers.js';
 
 const FOUNDRY_KEY = 'fk-test-0123456789';
 const KODEKEY_KEY = 'kk-spare-secret-key';
@@ -45,19 +44,6 @@ async function withStub(handler, fn) {
     await stub.close();
   }
 }
-
-async function withApp(config, runtime, fn) {
-  const server = http.createServer(createApp(config, runtime));
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  try {
-    await fn(`http://127.0.0.1:${server.address().port}`);
-  } finally {
-    server.closeAllConnections?.();
-    await new Promise((resolve) => server.close(resolve));
-  }
-}
-
-const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 // Chat for plain deployments; the "auto" one only works on the Responses API.
 const routes = (call) => {
@@ -262,6 +248,46 @@ test('URLs, keys and headers sent by the browser are never used', async () => {
       assert.equal(stub.calls[0].path, '/openai/v1/chat/completions');
       assert.equal(stub.calls[0].headers.authorization, `Bearer ${FOUNDRY_KEY}`);
       assert.ok(!JSON.stringify(stub.calls[0].body).includes('attacker'));
+    });
+  });
+});
+
+// ---- U3: a race permit is bound to the profiles requested at Start, not to the whole catalog ----------------
+
+test('a race permit bound to its requested line-up rejects a decide for a different, otherwise-valid catalog model', async () => {
+  await withStub(routes, async (stub) => {
+    const { config, runtime } = setup(stub, {
+      USAGE_CONTROL_ENABLED: 'true',
+      USAGE_DAILY_GLOBAL_RACES: '1000',
+      USAGE_SIGNING_SECRET: 'lineup-binding-secret',
+      USAGE_TABLE_ENDPOINT: 'https://example.table.core.windows.net',
+    });
+    const usage = createUsageService(config.usage, { store: createFakeStore() });
+
+    await withApp(config, runtime, usage, async (base) => {
+      // Start binds the permit to ALPHA and BETA only -- SPARE is a real catalog model, but not part of this race.
+      const start = await post(`${base}/api/races/start`, { runId: 'lineup-run-1', queueSize: 10, profiles: ['ALPHA', 'BETA'] });
+      assert.equal(start.status, 200);
+      const { permit } = await start.json();
+      const auth = { 'x-race-permit': permit, cookie: (start.headers.get('set-cookie') ?? '').split(';')[0] };
+
+      const outOfScope = await post(
+        `${base}/api/decide`,
+        { deskId: 1, profile: 'SPARE', paper: { id: 1, dossier: SAMPLE_PAPERS.reject }, operationId: 'd-spare' },
+        auth,
+      );
+      assert.equal(outOfScope.status, 403);
+      assert.equal((await outOfScope.json()).code, 'race_permit_invalid');
+      assert.equal(stub.calls.length, 0, 'the out-of-scope model is refused before any upstream call');
+
+      const inScope = await post(
+        `${base}/api/decide`,
+        { deskId: 1, profile: 'ALPHA', paper: { id: 1, dossier: SAMPLE_PAPERS.reject }, operationId: 'd-alpha' },
+        auth,
+      );
+      assert.equal(inScope.status, 200);
+      assert.equal((await inScope.json()).ok, true);
+      assert.equal(stub.calls.length, 1, 'a model the race was actually bound to is still allowed');
     });
   });
 });

@@ -33,15 +33,15 @@ Microsoft documents it in [Deploy and use Microsoft-Decision-1](https://learn.mi
 
 The vendor figures describe the model itself. This game measures what a caller actually experiences: the model **plus** the network round trip (and, for JEV, the KodeKey gateway hop).
 
-Average decision time in live runs on 13 October 2026 (one Foundry resource, the KodeKey gateway and a regular internet connection; runs of 10 to 20 applicants):
+Average decision time in live runs on 13 and 14 October 2026 (one Foundry resource, the KodeKey gateway and a regular internet connection; runs of 10 to 20 applicants):
 
 | Model | Type | Average decision | Accuracy |
 | --- | --- | --- | --- |
-| Decision 1 | System One | 0.49 to 0.71 s | 100% in every run |
+| Decision 1 | System One | 0.48 to 0.71 s | 100% in every run |
 | JEV (via KodeKey) | System One | 0.48 to 0.74 s | 100% in every run |
 | GPT-4.1 mini | small, fast LLM | 0.89 to 1.01 s | 100% in every run |
 | GPT-4.1 | large general-purpose LLM | about 1.3 s | 100% |
-| Grok 4.7 | reasoning LLM, default settings | about 6 s | 100% |
+| Grok 4.7 | reasoning LLM, default settings | about 6 to 8 s | 100% |
 
 ### The rival decides the gap
 
@@ -51,7 +51,7 @@ Three races on the same queue ([seed 2026](how-it-works.md#queue-seed), 20 appli
 | --- | --- | --- | --- |
 | GPT-4.1 mini | 885 ms | 574 ms (1.5x faster) | 680 ms (1.3x faster) |
 | GPT-4.1 | 1.32 s | 493 ms (2.7x faster) | 657 ms (2.0x faster) |
-| Grok 4.7 | 6.07 s | 556 ms (10.9x faster) | 477 ms (12.7x faster) |
+| Grok 4.7 | 8.20 s | 476 ms (17.2x faster) | 513 ms (16.0x faster) |
 
 ![The shift report of the GPT-4.1 race](images/vs-gpt-4-1-report.png)
 

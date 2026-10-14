@@ -2,7 +2,9 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { FIELDS, RULE_IDS, validateDossier } from '../shared/rulebook.js';
+import { QUEUE_SIZES, RACE_PERMIT_HEADER } from '../shared/usage.js';
 import { ROOT } from './env.js';
+import { USAGE_COOKIE_NAME, UsageError } from './usage.js';
 
 const STATIC_MOUNTS = [
   { prefix: '/shared/', dir: path.join(ROOT, 'shared') },
@@ -33,6 +35,9 @@ const CSP = [
 const MAX_BODY_BYTES = 64 * 1024;
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
+// A client-generated run id (Start) or operation id (one prepare/decide call): short, opaque, and transport-safe.
+const IDENTIFIER_RE = /^[A-Za-z0-9_:-]{1,200}$/;
+
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -40,9 +45,12 @@ class HttpError extends Error {
   }
 }
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, headers = {}) {
   const body = JSON.stringify(payload);
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' });
+  const base = { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) };
+  // A caller (e.g. a permit/protected-route response) may already have set a stricter cache-control; never widen it back.
+  if (!res.getHeader('cache-control')) base['cache-control'] = 'no-store';
+  res.writeHead(status, { ...base, ...headers });
   res.end(body);
 }
 
@@ -96,6 +104,43 @@ function parseProfiles(value, config) {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length < 1 || value.length > 3) throw new HttpError(400, 'profiles must list 1 to 3 models');
   return value.map((name) => parseProfile(name, config));
+}
+
+/** A client-supplied run id (Start) or operation id (prepare/decide): short, opaque, and safe to key storage rows with. */
+function parseIdentifier(value, label) {
+  if (typeof value !== 'string' || !IDENTIFIER_RE.test(value)) throw new HttpError(400, `${label} must be a short identifier`);
+  return value;
+}
+
+/** One of the queue sizes the UI actually offers (R8: unrelated shapes cannot be bound to a permit). */
+function parseQueueSize(value) {
+  if (!QUEUE_SIZES.includes(value)) throw new HttpError(400, `queueSize must be one of ${QUEUE_SIZES.join(', ')}`);
+  return value;
+}
+
+/** Minimal `Cookie` header parsing; only the usage-control visitor cookie is ever read back out of it. */
+function parseCookieHeader(header) {
+  const out = {};
+  for (const part of String(header ?? '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+/** The race permit travels only in this dedicated header (R8, R9); missing it is a direct-call bypass attempt. */
+function readPermitHeader(req) {
+  const raw = req.headers[RACE_PERMIT_HEADER];
+  const permit = Array.isArray(raw) ? raw[0] : raw;
+  if (!permit) throw new UsageError('race_permit_required', 401, 'A race permit is required for this route.');
+  return permit;
+}
+
+/** Resolves (without minting a fresh cookie) the anonymous visitor id bound to this request, if any. */
+function visitorIdFromRequest(req, usage) {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  return usage.resolveVisitor(cookies[USAGE_COOKIE_NAME]).visitorId;
 }
 
 /** Builds the decide request, forwarding only the dossier fields (never any ground truth). */
@@ -162,7 +207,10 @@ async function serveStatic(req, res, pathname) {
   createReadStream(filePath).pipe(res);
 }
 
-export function createApp(config, runtime) {
+// Every public route capable of spending model credits (R8); `/api/test` is further gated below (KTD9).
+const USAGE_GATED_ROUTES = ['/api/races/start', '/api/prepare', '/api/test', '/api/decide'];
+
+export function createApp(config, runtime, usage = null) {
   async function handleApi(req, res, pathname) {
     if (!isAllowedOrigin(req, config)) throw new HttpError(403, 'Forbidden origin');
 
@@ -176,13 +224,70 @@ export function createApp(config, runtime) {
       if (req.method !== 'GET') throw new HttpError(405, 'Use GET');
       return sendJson(res, 200, runtime.publicConfig());
     }
-    if (!['/api/prepare', '/api/test', '/api/decide'].includes(pathname)) throw new HttpError(404, 'Unknown API route');
+    if (!USAGE_GATED_ROUTES.includes(pathname)) throw new HttpError(404, 'Unknown API route');
+    // KTD9: once live usage control is enabled, the paid diagnostics route is removed from the public app.
+    if (pathname === '/api/test' && !(config.mock || !config.usage.enabled)) throw new HttpError(404, 'Unknown API route');
     if (req.method !== 'POST') throw new HttpError(405, 'Use POST');
 
+    const usageEnabled = config.usage.enabled;
+    // KTD7: a wiring bug that leaves `usage` unset must never silently reopen an enabled deployment.
+    if (usageEnabled && !usage) throw new UsageError('usage_control_unavailable', 503, 'Usage control is enabled but not available.');
+
+    const protectedRoute = pathname === '/api/races/start' || ((pathname === '/api/prepare' || pathname === '/api/decide') && usageEnabled);
+    if (protectedRoute) res.setHeader('cache-control', 'no-store, private'); // R8: permit/protected responses are never cached.
+
     const body = await readJson(req);
-    if (pathname === '/api/prepare') return sendJson(res, 200, { desks: await runtime.prepare({ ...options, profiles: parseProfiles(body?.profiles, config) }) });
+
+    if (pathname === '/api/races/start') {
+      if (!usageEnabled) return sendJson(res, 200, { enabled: false });
+
+      const runId = parseIdentifier(body?.runId, 'runId');
+      const queueSize = parseQueueSize(body?.queueSize);
+      const profiles = parseProfiles(body?.profiles, config) ?? config.lineup;
+      const deskCount = profiles.length;
+
+      // Best-effort burst prefilter (KTD8); never the authority, and never reached once input is invalid.
+      const socketIp = req.socket?.remoteAddress ?? '';
+      const forwardedFor = req.headers['x-forwarded-for'];
+      if (!usage.checkIpBurst(socketIp, { appService: config.usage.appService, forwardedFor })) {
+        throw new UsageError('start_rate_limit', 429, 'Too many race starts from this address; try again shortly.', { retryAfterMs: 60_000 });
+      }
+
+      const cookies = parseCookieHeader(req.headers.cookie);
+      const { visitorId, cookieValue } = usage.resolveVisitor(cookies[USAGE_COOKIE_NAME]);
+      const race = await usage.startRace({ visitorId, runId, profiles, queueSize, deskCount });
+
+      // Sets or refreshes the signed visitor cookie regardless of whether it already existed (R1, R4).
+      res.setHeader('set-cookie', usage.cookieHeader(cookieValue, { secure: !LOOPBACK_HOSTS.has(config.host) }));
+      // Only the opaque permit and timing are returned; remaining visitor/global capacity is never exposed.
+      return sendJson(res, 200, { permit: race.permit, resetAt: race.resetAt.toISOString(), expiresAt: race.expiresAt.toISOString() });
+    }
+
+    if (pathname === '/api/prepare') {
+      const profiles = parseProfiles(body?.profiles, config);
+      if (usageEnabled) {
+        const permit = readPermitHeader(req);
+        const operationId = parseIdentifier(body?.operationId, 'operationId');
+        const reservation = await usage.reservePreparation({ permit, visitorId: visitorIdFromRequest(req, usage), operationId });
+        // KTD11: a transport-retried operation id is recognized, not re-reserved -- it must not start a second
+        // preparation either, so a replayed request answers from the reservation alone.
+        if (reservation.recognized) return sendJson(res, 200, { desks: [], recognized: true });
+      }
+      return sendJson(res, 200, { desks: await runtime.prepare({ ...options, profiles }) });
+    }
     if (pathname === '/api/test') return sendJson(res, 200, { desks: await runtime.test({ ...options, profiles: parseProfiles(body?.profiles, config) }) });
-    return sendJson(res, 200, await runtime.decide(parseDecideRequest(body, config), options));
+
+    const decideRequest = parseDecideRequest(body, config);
+    if (usageEnabled) {
+      const permit = readPermitHeader(req);
+      const operationId = parseIdentifier(body?.operationId, 'operationId');
+      // The model actually seated at this desk: the requested profile, or the default line-up's one for it.
+      const effectiveProfile = decideRequest.profile ?? config.desks.find((desk) => desk.id === decideRequest.deskId)?.profile;
+      const reservation = await usage.reserveDecision({ permit, visitorId: visitorIdFromRequest(req, usage), operationId, profile: effectiveProfile });
+      // Same idempotency guarantee as preparation: a replayed decision operation id is answered, never re-run.
+      if (reservation.recognized) return sendJson(res, 200, { ok: true, recognized: true, deskId: decideRequest.deskId, paperId: decideRequest.paper.id });
+    }
+    return sendJson(res, 200, await runtime.decide(decideRequest, options));
   }
 
   return async function handle(req, res) {
@@ -195,6 +300,17 @@ export function createApp(config, runtime) {
       else await serveStatic(req, res, pathname);
     } catch (error) {
       if (res.headersSent) return res.destroy();
+      if (error instanceof UsageError) {
+        // R14: never serialize raw errors, permits, cookies, or addresses -- only the stable code and timing.
+        const body = { error: error.message, code: error.code };
+        const headers = { 'cache-control': 'no-store, private' };
+        if (error.resetAt) {
+          body.resetAt = error.resetAt.toISOString();
+          headers['retry-after'] = String(Math.max(0, Math.ceil((error.resetAt.getTime() - Date.now()) / 1000)));
+        }
+        if (error.retryAfterMs != null) headers['retry-after'] = String(Math.max(0, Math.ceil(error.retryAfterMs / 1000)));
+        return sendJson(res, error.status, body, headers);
+      }
       if (error instanceof HttpError) {
         if (error.status === 413) res.setHeader('connection', 'close');
         return sendJson(res, error.status, { error: error.message });

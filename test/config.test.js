@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { azureAuth, classifyEndpoint, foundryBaseUrl, foundryDeploymentHint, foundryRoutes, loadConfig, publicConfig } from '../server/config.js';
+import { azureAuth, classifyEndpoint, foundryBaseUrl, foundryDeploymentHint, foundryRoutes, loadConfig, publicConfig, UsageConfigError } from '../server/config.js';
 
 const HOST = 'https://example-resource.services.ai.azure.com';
 
@@ -263,4 +263,206 @@ test('publicConfig shows how each desk is called and never contains a secret, he
   assert.deepEqual(desks.map((d) => d.mode), ['questions', null, 'systemone']);
   assert.equal(desks.length, 3);
   assert.equal(publicConfig(config, new Map([['DESK1', 'chat']]), new Map()).desks[0].mode, 'chat');
+});
+
+// --- Usage control configuration (U1: R7, R13, R14; KTD3, KTD10) ---
+
+test('usage control is disabled by default and the default visitor allowance and test availability are still public', () => {
+  const config = loadConfig({});
+  assert.deepEqual(config.usage, {
+    enabled: false,
+    appService: false,
+    visitorDailyLimit: 10,
+    dailyGlobalRaces: null,
+    tableEndpoint: null,
+    tableName: 'RaceUsage',
+    storageConnectionString: null,
+    signingSecret: null,
+    permitMinutes: 45,
+    startsPerMinute: 6,
+  });
+  const pub = publicConfig(config);
+  assert.deepEqual(pub.usage, { enabled: false, visitorDailyLimit: 10, testAvailable: true });
+});
+
+test('a fully specified enabled configuration parses the global cap, visitor limit, permit lifetime, table target and burst ceiling', () => {
+  const config = loadConfig({
+    USAGE_CONTROL_ENABLED: 'true',
+    USAGE_DAILY_GLOBAL_RACES: '500',
+    USAGE_TABLE_ENDPOINT: 'https://acct.table.core.windows.net',
+    USAGE_TABLE_NAME: 'RaceUsageDev',
+    USAGE_SIGNING_SECRET: 'a-stable-secret',
+    USAGE_PERMIT_MINUTES: '60',
+    USAGE_STARTS_PER_MINUTE: '12',
+    USAGE_VISITOR_DAILY_LIMIT: '25',
+  });
+  assert.equal(config.usage.enabled, true);
+  assert.equal(config.usage.dailyGlobalRaces, 500);
+  assert.equal(config.usage.tableEndpoint, 'https://acct.table.core.windows.net');
+  assert.equal(config.usage.tableName, 'RaceUsageDev');
+  assert.equal(config.usage.permitMinutes, 60);
+  assert.equal(config.usage.startsPerMinute, 12);
+  assert.equal(config.usage.visitorDailyLimit, 25);
+});
+
+test('the visitor allowance defaults to 10 a day and USAGE_VISITOR_DAILY_LIMIT sets it, publicly too', () => {
+  const base = { USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '100', USAGE_SIGNING_SECRET: 's', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' };
+  assert.equal(loadConfig(base).usage.visitorDailyLimit, 10);
+  assert.equal(loadConfig({ ...base, USAGE_VISITOR_DAILY_LIMIT: '' }).usage.visitorDailyLimit, 10);
+  assert.equal(loadConfig({ ...base, USAGE_VISITOR_DAILY_LIMIT: '3' }).usage.visitorDailyLimit, 3);
+  assert.equal(loadConfig({ ...base, USAGE_VISITOR_DAILY_LIMIT: ' 1000 ' }).usage.visitorDailyLimit, 1000);
+  assert.equal(publicConfig(loadConfig({ ...base, USAGE_VISITOR_DAILY_LIMIT: '3' })).usage.visitorDailyLimit, 3);
+});
+
+test('enabled usage control rejects a visitor limit that is not a whole number from 1 to 1000', () => {
+  const base = { USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '100', USAGE_SIGNING_SECRET: 's', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' };
+  for (const bad of ['0', '-3', '2.5', 'ten', '1001']) {
+    assert.throws(
+      () => loadConfig({ ...base, USAGE_VISITOR_DAILY_LIMIT: bad }),
+      (error) => error instanceof UsageConfigError && /USAGE_VISITOR_DAILY_LIMIT/.test(error.message),
+      `USAGE_VISITOR_DAILY_LIMIT=${bad} should fail startup`,
+    );
+  }
+});
+
+test('a bad USAGE_VISITOR_DAILY_LIMIT is ignored while usage control is disabled', () => {
+  assert.equal(loadConfig({ USAGE_VISITOR_DAILY_LIMIT: 'ten' }).usage.visitorDailyLimit, 10);
+});
+
+test('a local connection string is accepted outside App Service without a table endpoint', () => {
+  const config = loadConfig({
+    USAGE_CONTROL_ENABLED: 'true',
+    USAGE_DAILY_GLOBAL_RACES: '10',
+    USAGE_SIGNING_SECRET: 'secret',
+    USAGE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
+  });
+  assert.equal(config.usage.storageConnectionString, 'UseDevelopmentStorage=true');
+});
+
+test('zero is a valid USAGE_DAILY_GLOBAL_RACES (emergency stop)', () => {
+  const config = loadConfig({
+    USAGE_CONTROL_ENABLED: 'true',
+    USAGE_DAILY_GLOBAL_RACES: '0',
+    USAGE_SIGNING_SECRET: 'secret',
+    USAGE_TABLE_ENDPOINT: 'https://acct.table.core.windows.net',
+  });
+  assert.equal(config.usage.dailyGlobalRaces, 0);
+});
+
+test('enabled usage control rejects a missing global cap', () => {
+  assert.throws(
+    () => loadConfig({ USAGE_CONTROL_ENABLED: 'true', USAGE_SIGNING_SECRET: 's', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' }),
+    (error) => error instanceof UsageConfigError && /USAGE_DAILY_GLOBAL_RACES/.test(error.message),
+  );
+});
+
+test('enabled usage control rejects a negative global cap', () => {
+  assert.throws(
+    () => loadConfig({ USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '-1', USAGE_SIGNING_SECRET: 's', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' }),
+    UsageConfigError,
+  );
+});
+
+test('enabled usage control rejects a missing signing secret', () => {
+  assert.throws(
+    () => loadConfig({ USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '10', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' }),
+    (error) => error instanceof UsageConfigError && /USAGE_SIGNING_SECRET/.test(error.message),
+  );
+});
+
+test('enabled usage control rejects a missing storage target outside App Service', () => {
+  assert.throws(
+    () => loadConfig({ USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '10', USAGE_SIGNING_SECRET: 's' }),
+    (error) => error instanceof UsageConfigError && /USAGE_TABLE_ENDPOINT/.test(error.message),
+  );
+});
+
+test('enabled usage control rejects an invalid table name', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        USAGE_CONTROL_ENABLED: 'true',
+        USAGE_DAILY_GLOBAL_RACES: '10',
+        USAGE_SIGNING_SECRET: 's',
+        USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net',
+        USAGE_TABLE_NAME: '1-bad name!',
+      }),
+    (error) => error instanceof UsageConfigError && /USAGE_TABLE_NAME/.test(error.message),
+  );
+});
+
+test('enabled usage control rejects out-of-range numeric settings', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        USAGE_CONTROL_ENABLED: 'true',
+        USAGE_DAILY_GLOBAL_RACES: '10',
+        USAGE_SIGNING_SECRET: 's',
+        USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net',
+        USAGE_PERMIT_MINUTES: '0',
+      }),
+    (error) => error instanceof UsageConfigError && /USAGE_PERMIT_MINUTES/.test(error.message),
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        USAGE_CONTROL_ENABLED: 'true',
+        USAGE_DAILY_GLOBAL_RACES: '10',
+        USAGE_SIGNING_SECRET: 's',
+        USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net',
+        USAGE_STARTS_PER_MINUTE: '-5',
+      }),
+    (error) => error instanceof UsageConfigError && /USAGE_STARTS_PER_MINUTE/.test(error.message),
+  );
+});
+
+test('enabled usage control collects every validation issue in one error', () => {
+  assert.throws(
+    () => loadConfig({ USAGE_CONTROL_ENABLED: 'true' }),
+    (error) => error instanceof UsageConfigError && error.issues.length >= 3,
+  );
+});
+
+test('App Service rejects a connection string and requires a table endpoint instead', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        USAGE_CONTROL_ENABLED: 'true',
+        USAGE_DAILY_GLOBAL_RACES: '10',
+        USAGE_SIGNING_SECRET: 's',
+        USAGE_STORAGE_CONNECTION_STRING: 'UseDevelopmentStorage=true',
+        WEBSITE_SITE_NAME: 'ai-model-speed-race',
+      }),
+    (error) => error instanceof UsageConfigError && /USAGE_STORAGE_CONNECTION_STRING/.test(error.message) && /App Service/.test(error.message),
+  );
+  const config = loadConfig({
+    USAGE_CONTROL_ENABLED: 'true',
+    USAGE_DAILY_GLOBAL_RACES: '10',
+    USAGE_SIGNING_SECRET: 's',
+    USAGE_TABLE_ENDPOINT: 'https://acct.table.core.windows.net',
+    WEBSITE_SITE_NAME: 'ai-model-speed-race',
+  });
+  assert.equal(config.usage.appService, true);
+  assert.equal(config.usage.storageConnectionString, null);
+});
+
+test('publicConfig never exposes the signing secret, connection string or table endpoint', () => {
+  const config = loadConfig({
+    USAGE_CONTROL_ENABLED: 'true',
+    USAGE_DAILY_GLOBAL_RACES: '10',
+    USAGE_SIGNING_SECRET: 'TOPSECRETSIGNINGKEY',
+    USAGE_TABLE_ENDPOINT: 'https://acct.table.core.windows.net',
+  });
+  const json = JSON.stringify(publicConfig(config));
+  assert.ok(!json.includes('TOPSECRETSIGNINGKEY'));
+  assert.ok(!/table.core.windows.net|signingSecret|storageConnectionString|tableEndpoint/i.test(json));
+  assert.deepEqual(JSON.parse(json).usage, { enabled: true, visitorDailyLimit: 10, testAvailable: false });
+});
+
+test('mock mode keeps /api/test available even when usage control is enabled', () => {
+  const config = loadConfig(
+    { USAGE_CONTROL_ENABLED: 'true', USAGE_DAILY_GLOBAL_RACES: '10', USAGE_SIGNING_SECRET: 's', USAGE_TABLE_ENDPOINT: 'https://a.table.core.windows.net' },
+    { mock: true },
+  );
+  assert.equal(publicConfig(config).usage.testAvailable, true);
 });
