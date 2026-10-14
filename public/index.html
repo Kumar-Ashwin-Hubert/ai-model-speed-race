@@ -21,12 +21,18 @@
           <button id="startBtn" class="btn primary" disabled>Start shift</button>
           <button id="resetBtn" class="btn" disabled>Reset</button>
           <button id="resultsBtn" class="btn" disabled>Results</button>
+          <button id="helpBtn" class="btn" aria-haspopup="dialog" aria-controls="intro" title="What is this game? (H)">How it works</button>
           <button id="focusBtn" class="btn" aria-pressed="false" title="Hide the side panel so the hall fills the window (F)">Focus view</button>
         </div>
       </header>
 
       <main class="main">
         <section class="stage">
+          <div class="briefing" aria-labelledby="briefingTitle">
+            <h2 id="briefingTitle">Three AI models. Same queue. Who finishes first?</h2>
+            <p>Each desk is run by a different AI, checking identical applicants against the same six border-entry rules. Watch them approve or reject each case, then compare speed, accuracy and cost.</p>
+            <p class="briefing-hint"><strong>You watch; the AIs decide.</strong> Press <strong>Start shift</strong> to begin. Click a lane to inspect its case file.</p>
+          </div>
           <canvas id="stage" aria-label="Top-down view of three approval desks, each with a queue of applicants"></canvas>
         </section>
         <aside class="side">
@@ -41,6 +47,22 @@
       </main>
     </div>
 
+    <dialog id="intro" class="intro" aria-labelledby="introTitle">
+      <div class="dialog-body">
+        <h2 id="introTitle">How the race works</h2>
+        <p class="lead">Think of it as a border checkpoint staffed by AI. You are the spectator, not the officer: no manual approvals or quick reactions needed.</p>
+        <ol class="steps">
+          <li><strong>Start the shift.</strong> Three desks get the same applicants in the same order. Each model reads a file and decides <em>approve</em> or <em>reject</em> using six shared rules. Breaking any one rule means rejection.</li>
+          <li><strong>Watch the queues.</strong> Applicants wait at the window for a decision. The first desk to finish its queue wins the speed race, but faster does not necessarily mean more accurate. Click a lane to inspect its decisions; open <em>Rulebook</em> for the rules.</li>
+          <li><strong>Read the report.</strong> The shift report opens automatically at the end. Compare total time, average model decision time, accuracy and cost. Total time includes animation; average decision time measures the model call.</li>
+        </ol>
+        <p><strong>Why compare them?</strong> Decision models such as Microsoft Decision 1 and JEV are built for bounded, rule-based tasks. General-purpose language models (LLMs), such as GPT, handle a wider range of work. This race shows their trade-offs on one small task, not which AI is best overall. Change the models or queue size in <em>Setup</em>.</p>
+        <p class="muted small">Check the badge: LIVE MODELS uses real model calls; SIMULATED MODELS uses pretend decisions and delays, not benchmark measurements.</p>
+        <div class="dialog-actions">
+          <button id="introClose" class="btn primary" autofocus>Back to the desks</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="results" aria-label="Shift report"></dialog>
     <div id="toast" class="toast hidden" role="status"></div>
     <script type="module" src="/js/main.js"></script>
