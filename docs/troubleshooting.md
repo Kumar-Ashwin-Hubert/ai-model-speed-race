@@ -20,6 +20,7 @@ Start with `npm run check`: it calls every desk with a clean and a bad sample ap
 | A desk shows *OFFLINE* or *STOPPED* | The reason is printed in the lane, the Case file tab and the report |
 | Very slow reasoning model | Use fewer applicants per desk (Setup tab) or a lower reasoning effort |
 | Setup says "This server is older than the page" | Restart the server (`npm start`) so it serves the model list |
+| Cost shows *n/a* for a desk | The game has no price for that model. Set `MODEL_*_PRICE_IN` and `MODEL_*_PRICE_OUT` (USD per 1M tokens) in `.env`; the report names the exact variables. If you just updated the game, restart the server (`npm start`): an older server only knows the prices in `.env`. See [how cost is measured](setup.md#how-cost-and-tokens-are-measured) |
 | "Cleared in" looks far too slow while the average decision is fast | Usually the game tab was in the background; browsers slow timers there. Keep the tab visible during a race |
 
 More on configuration: [Setup and configuration](setup.md).

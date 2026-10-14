@@ -65,7 +65,7 @@ The page only ever names a model. It never supplies a URL, key or header, so tho
 | `MODEL_<NAME>_MODE` | System One models only: `questions` (KodeKey default), `systemone` (Foundry default) or `auto` |
 | `MODEL_<NAME>_KIND` | `llm` or `systemone`. Normally inferred from the model name (`jev`, `decision-1`) or the URL |
 | `MODEL_<NAME>_REASONING_EFFORT`, `_TEMPERATURE`, `_MAX_TOKENS` | Optional model tuning. Values a model rejects are dropped automatically. Grok 4.7 reasons at `high` by default; `low` is much faster |
-| `MODEL_<NAME>_PRICE_IN`, `_PRICE_OUT` | USD per 1M tokens, enables the cost columns. JEV defaults to its list price ($0.042 in, output free) |
+| `MODEL_<NAME>_PRICE_IN`, `_PRICE_OUT`, `_PRICE_CACHED_IN` | USD per 1M tokens, for the cost columns. Optional: the models below have [built-in prices](#how-cost-and-tokens-are-measured). Set these to override them or to price another model. A cached rate is optional; without one, cached input tokens cost the normal input rate |
 
 The older `DESK1_*`, `DESK2_*`, `DESK3_*` variables (same suffixes) are still read for any desk `LINEUP` does not name. The hall always has three desks.
 
@@ -92,7 +92,8 @@ questions travel in `response_format`:
 
 - `POST /v1/chat/completions` with the application as the user message and `response_format: { "type": "questions", "questions": { ... } }`
   (the *Rulebook* tab in the game shows the exact body).
-- The reply content is a JSON map of answers, one probability per question. The usage block carries the token counts used for the cost estimate.
+- The reply content is a JSON map of answers, one probability per question. The usage block carries the token counts, and `usage.cost` (also sent as the
+  `x-litellm-response-cost` header) is the gateway's own price for the call, which the game shows as the cost.
 - **The model id matters.** A token can only call the models its group allows. The free group exposes `typesafe/jev-1.13.0`; the alias
   `jev-latest` answers 403. `npm run check` lists the JEV ids your key can use.
 - `MODE=systemone` (with `KODEKEY_JEV_PATH`) is there for a gateway that exposes TypeSafe's native route; `MODE=auto` tries both once, before the race clock starts.
@@ -108,5 +109,51 @@ questions travel in `response_format`:
   Before the clock starts it validates the key once, so a wrong key stops that desk instead of making it look fast.
 - Keys only. Microsoft Entra ID sign-in is not implemented, so the resource must allow key authentication.
 - `npm run check` lists the deployments on the resource (when the resource allows it) and suggests the closest name when yours is not one of them.
+
+### How cost and tokens are measured
+
+Tokens and cost come from each model's own response, not from assumptions. (Demo mode simulates both and says so.)
+
+| Model | Tokens come from | Cost comes from |
+| --- | --- | --- |
+| JEV (KodeKey) | `usage.prompt_tokens`, `completion_tokens` | the gateway's own figure for the call, `usage.cost`: $0.042 per 1M input tokens, output free |
+| Decision 1 | `usage.input_tokens`, `output_tokens` | input tokens times $0.042 per 1M, output free. Azure lists one $0.042 "tokens" meter, the same rate as JEV's input price, and TypeSafe charges nothing for System One output. Microsoft does not spell this out: if your invoice bills output tokens, set `MODEL_DECISION1_PRICE_OUT=0.042` |
+| GPT-4.1 mini | `usage.input_tokens`, `output_tokens` | tokens times $0.40 in, $0.10 cached in, $1.60 out per 1M |
+| GPT-4.1 | `usage.input_tokens`, `output_tokens` | tokens times $2.00 in, $0.50 cached in, $8.00 out per 1M |
+| Grok 4.7 | `usage.prompt_tokens`, `completion_tokens` plus `reasoning_tokens` | tokens times $2.00 in, $0.50 cached in, $6.00 out per 1M |
+
+- **A cost the provider reports wins.** KodeKey sends one with each JEV call (`usage.cost`). Azure sends none, so for Azure models the cost is the response's tokens times a price:
+  yours from `.env`, otherwise the built-in list price. The built-in prices are Azure's Global Standard pay-as-you-go prices from the
+  [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) and TypeSafe's list price for JEV, checked on 14 October 2026 (see `shared/pricing.js`).
+  Your invoice can differ: Data Zone and Regional deployments cost more, and discounts or committed use cost less.
+- A deployment with its own name is still priced when its response names a known model (for example `gpt-4.1-mini`). Otherwise its cost shows **n/a** together with the two variables to set.
+- **Reasoning tokens are output.** Grok reports them next to `completion_tokens`, so the game adds them, and never double counts providers that already include them.
+- **Cached input** is part of the input that the provider served from its prompt cache, and costs the cached rate. Grok 4.7 caches the repeated prompt, so on later calls most of the input is cached.
+- **An unusable reply still counts.** A reasoning model that runs out of tokens before it answers returns nothing usable, but those tokens were billed, so they are in the totals.
+- **Not counted:** calls that never got an answer (timeouts, HTTP errors) report no usage, and neither do the one-off calls of `npm run check`, the connection test and call-mode detection.
+- A response with no usage block at all is shown as missing tokens, never as zero, and the report says so.
+
+#### Why JEV and Decision 1 report different token counts
+
+For the same application and the same six questions, JEV (through KodeKey) reports about twice the input tokens that Decision 1 does, and far more output tokens.
+Each service reports what it counts, and the game shows exactly that, so the numbers are accurate but not comparable one-to-one. The report marks JEV's token and cost cells with an asterisk and explains it in a note under the table.
+Measured on 14 October 2026 by sending both services the same requests with one piece changed at a time (tokens in / out):
+
+| Request | JEV via KodeKey | Decision 1 on Azure |
+| --- | --- | --- |
+| The game's request: the application and 6 questions | 459 / 108 | 219 / 6 |
+| The same with 3 questions | 400 / 54 | 149 / 3 |
+| The same with 1 question | 363 / 21 | 105 / 1 |
+| The application replaced by "x", 6 questions | 381 / 108 | 149 / 6 |
+| The application replaced by "x", 1 question | 285 / 21 | 35 / 1 |
+| The application plus about 150 tokens of extra text, 6 questions | 610 / 108 | 373 / 6 |
+
+- **Decision 1 counts what you send.** Its input is the tokens of the application plus the questions as JSON (a local tokenizer gives 70 for this application and 143 for the questions; Decision 1 reports 219),
+  and each extra token of text adds one. Its output is one token per answer.
+- **KodeKey adds a fixed overhead of about 250 input tokens to every request.** Text and questions are counted about as Decision 1 counts them (the extra 150 tokens of text add 151), but even an almost empty
+  request, the letter "x" and one tiny question, reports 270. It also counts the JSON text of the answers as output, about 18 tokens each. KodeKey has no native System One route (it answers 404), so JEV can only be reached through its chat route.
+- **Costs follow from the counts.** KodeKey prices the tokens it reports (its reported cost is the input tokens times $0.042 per 1M), and Decision 1 is priced the same way from its own count. So although both list $0.042 per 1M input tokens
+  with free output, JEV through KodeKey costs about twice as much per decision here (about $0.020 against $0.0095 per 1,000 decisions). That is the overhead. It weighs less as applications get longer, and it says nothing about
+  JEV reached some other way, which we could not test.
 
 Something not working? See [Troubleshooting](troubleshooting.md).

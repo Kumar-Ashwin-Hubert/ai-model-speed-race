@@ -60,8 +60,9 @@ The reasoning-model race, with its report, is in the [README](../README.md#what-
 ### Why the gap opens up against bigger models
 
 1. **Every call pays for the network.** That round trip is the same for every model and sits on top of whatever the model itself needs. It is why the gap is modest against a small, quick LLM.
-2. **LLMs answer one token at a time, and reasoning models think first.** Grok 4.7 produced around 330 output tokens per decision, almost all of it reasoning. Decision 1 produced about 6 and JEV about 108.
-   A decision model scores every question in parallel in a single pass instead of generating text.
+2. **LLMs answer one token at a time, and reasoning models think first.** Grok 4.7 produced around 330 output tokens per decision, almost all of it reasoning. Decision 1 reported about 6 (one per answer) and JEV about 108.
+   A decision model scores every question in parallel in a single pass instead of generating text. JEV's 108 is not generated text: KodeKey counts the JSON text of the six answers it returns
+   (see [why JEV and Decision 1 report different token counts](setup.md#why-jev-and-decision-1-report-different-token-counts)).
 3. **The task is a good fit.** Six literal rules, no arithmetic: the kind of bounded, repetitive decision these models are built for. All five models got all 20 applicants right in these races,
    so the extra deliberation bought no accuracy here. A task that needs open-ended or multi-step reasoning would be a different story.
 
@@ -71,8 +72,11 @@ What we did not see: the vendors' larger claims (40 to 200x). The widest gap we 
 
 - Grok 4.7 ran at its **default reasoning effort**, with the game's default 4,096-token cap and 60 s timeout. No call failed, and none came near those limits.
 - **Reasoning tokens count as output tokens.** Grok reports them separately from `completion_tokens`, so the game adds them when the provider's totals show they are separate (and never double counts providers that already include them).
-- **Token counts are not costs.** JEV sends more tokens per decision than the LLMs, because every request carries the six typed questions, but it is priced at $0.042 per million input tokens with free output.
-  Add each deployment's price in `.env` (`MODEL_<NAME>_PRICE_IN` and `_PRICE_OUT`) to compare cost as well as speed.
+- **Token counts are not comparable between providers, and they are not costs.** For the same application and the same six questions, JEV through KodeKey reports about twice the input tokens of Decision 1 or an LLM
+  (about 460 against about 220), because KodeKey adds a fixed overhead to every request, not because the questions are long. Both list $0.042 per million input tokens with free output, so JEV costs about twice as much per decision here
+  only because of that overhead. See [why JEV and Decision 1 report different token counts](setup.md#why-jev-and-decision-1-report-different-token-counts).
+  The game shows a cost for every model, worked out from the token counts in each response and the provider's own price or a built-in list price.
+  See [how cost and tokens are measured](setup.md#how-cost-and-tokens-are-measured); `.env` prices override the built-in ones.
 - Your network, region and deployments will move these numbers. That is what the game is for: change the rival in **Setup**, use 30 to 50 applicants and **Benchmark** pace, and run it a few times.
 
 ## Sources
