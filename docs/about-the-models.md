@@ -45,13 +45,13 @@ Average decision time in live runs on 13 October 2026 (one Foundry resource, the
 
 ### The rival decides the gap
 
-Three races on the same queue ([seed 2026](how-it-works.md#queue-seed), 20 applicants, default pace), each pitting Decision 1 and JEV against a different rival:
+Three races on the same queue ([seed 2026](how-it-works.md#queue-seed), 20 applicants, default pace), each pitting Decision 1 and JEV against a different rival. Figures are rounded and shift a little from run to run:
 
-| Rival | Rival's average decision | Decision 1 | JEV |
-| --- | --- | --- | --- |
-| GPT-4.1 mini | 885 ms | 574 ms (1.5x faster) | 680 ms (1.3x faster) |
-| GPT-4.1 | 1.32 s | 493 ms (2.7x faster) | 657 ms (2.0x faster) |
-| Grok 4.7 | 6.07 s | 556 ms (10.9x faster) | 477 ms (12.7x faster) |
+| Rival | Rival's average decision | Decision 1 and JEV (about 0.6 s per decision) |
+| --- | --- | --- |
+| GPT-4.1 mini | about 0.9 s | about 1.5x faster |
+| GPT-4.1 | about 1.3 s | about 2x faster |
+| Grok 4.7 | about 6 s | about 10x faster |
 
 ![The shift report of the GPT-4.1 race](images/vs-gpt-4-1-report.png)
 
@@ -60,13 +60,13 @@ The reasoning-model race, with its report, is in the [README](../README.md#what-
 ### Why the gap opens up against bigger models
 
 1. **Every call pays for the network.** That round trip is the same for every model and sits on top of whatever the model itself needs. It is why the gap is modest against a small, quick LLM.
-2. **LLMs answer one token at a time, and reasoning models think first.** Grok 4.7 produced around 330 output tokens per decision, almost all of it reasoning. Decision 1 reported about 6 (one per answer) and JEV about 108.
+2. **LLMs answer one token at a time, and reasoning models think first.** Grok 4.7 produced a few hundred output tokens per decision, almost all of it reasoning. Decision 1 reported about 6 (one per answer) and JEV about 108.
    A decision model scores every question in parallel in a single pass instead of generating text. JEV's 108 is not generated text: KodeKey counts the JSON text of the six answers it returns
    (see [why JEV and Decision 1 report different token counts](setup.md#why-jev-and-decision-1-report-different-token-counts)).
 3. **The task is a good fit.** Six literal rules, no arithmetic: the kind of bounded, repetitive decision these models are built for. All five models got all 20 applicants right in these races,
    so the extra deliberation bought no accuracy here. A task that needs open-ended or multi-step reasoning would be a different story.
 
-What we did not see: the vendors' larger claims (40 to 200x). The widest gap we measured was about 13x, against a reasoning model.
+What we did not see: the vendors' larger claims (40 to 200x). The widest gap we measured was about 10x, against a reasoning model.
 
 ### How the large-model races were run
 

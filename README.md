@@ -46,36 +46,37 @@ Tokens come from each response, and cost from the provider's own figure or a bui
 
 ## What we measured
 
-Three real races on 13 October 2026, all on the same queue ([seed 2026](docs/how-it-works.md#queue-seed), 20 applicants per desk, default pace).
+Three real races on the same queue ([seed 2026](docs/how-it-works.md#queue-seed), 20 applicants per desk, default pace).
 In each one Decision 1 and JEV raced a different rival at the third desk, from a small fast LLM up to a reasoning model.
+Figures are rounded: they shift a little from run to run with your network and deployments.
 
-| Rival at the third desk | Rival's average decision | Decision 1 | JEV |
-| --- | --- | --- | --- |
-| GPT-4.1 mini (small, fast LLM) | 885 ms | 574 ms, **1.5x** faster | 680 ms, **1.3x** faster |
-| GPT-4.1 (large general-purpose LLM) | 1.32 s | 493 ms, **2.7x** faster | 657 ms, **2.0x** faster |
-| Grok 4.7 (reasoning LLM, default settings) | 6.07 s | 556 ms, **10.9x** faster | 477 ms, **12.7x** faster |
+| Rival at the third desk | Rival's average decision | Decision 1 and JEV (about 0.6 s per decision) |
+| --- | --- | --- |
+| GPT-4.1 mini (small, fast LLM) | about 0.9 s | about **1.5x** faster |
+| GPT-4.1 (large general-purpose LLM) | about 1.3 s | about **2x** faster |
+| Grok 4.7 (reasoning LLM, default settings) | about 6 s | about **10x** faster |
 
 Every desk got every applicant right in every race, so the extra size and extra thinking bought no accuracy on this task. What it cost is time:
 **the more a model deliberates, the bigger the gap.**
 
-![After 21 seconds JEV and Decision 1 have cleared all 20 applicants while Grok 4.7 has handled 3](docs/images/vs-reasoning-in-progress.png)
+![After about 20 seconds JEV and Decision 1 have cleared all 20 applicants while Grok 4.7 has handled only a few](docs/images/vs-reasoning-in-progress.png)
 
-*The reasoning-model race after 21 seconds: JEV and Decision 1 have cleared their queues; Grok 4.7 has handled 3 applicants.*
+*The reasoning-model race after about 20 seconds: JEV and Decision 1 have cleared their queues; Grok 4.7 has handled only a few applicants.*
 
-![The shift report: JEV 14.6 s, Decision 1 16.1 s, Grok 4.7 2 min 6 s, all 100% accurate](docs/images/vs-reasoning-report.png)
+![The shift report: JEV and Decision 1 finish in about 15 seconds, Grok 4.7 in about 2 minutes, all 100% accurate](docs/images/vs-reasoning-report.png)
 
-JEV cleared the queue in 14.6 s and Decision 1 in 16.1 s. Grok 4.7 needed 2 minutes 6 seconds for the same decisions, about 6 s each. It reasons in text before it answers
-(around 330 tokens per decision), while a decision model scores all six rules in one parallel pass.
+JEV and Decision 1 each cleared the queue in about 15 seconds. Grok 4.7 needed about 2 minutes for the same decisions, roughly 6 s each. It reasons in text before it answers
+(a few hundred tokens per decision), while a decision model scores all six rules in one parallel pass.
 *Cleared in* includes a fixed 230 ms of animation per applicant for every desk, so it understates the gap; *average decision* is pure model time.
 
 <details>
 <summary>The small-model race in detail (GPT-4.1 mini)</summary>
 
-| Approver | Cleared in | Average decision | P95 | Accuracy |
-| --- | --- | --- | --- | --- |
-| Decision 1 | 16.4 s | 574 ms | 936 ms | 100% |
-| JEV | 18.5 s | 680 ms | 877 ms | 100% |
-| GPT-4.1 mini | 22.6 s | 885 ms | 940 ms | 100% |
+| Approver | Cleared in | Average decision | Accuracy |
+| --- | --- | --- | --- |
+| JEV | about 15 s | about 0.6 s | 100% |
+| Decision 1 | about 15 s | about 0.6 s | 100% |
+| GPT-4.1 mini | about 25 s | about 0.9 s | 100% |
 
 ![The shift report after the small-model race](docs/images/shift-report.png)
 
@@ -115,7 +116,7 @@ That is exactly the job in this game, which is why they win here. Treat it as a 
 **Is this a benchmark?** No. It is a demonstration on one small, synthetic task. It shows speed, accuracy and cost on that task and does not rank the models in general.
 
 **Why isn't the gap 40-200x, like some vendor claims?** Those figures describe the model alone, in other comparisons. In this game every call also pays for the network, and the rival decides how big the gap is:
-about 1.3x to 1.5x against a small LLM, 2x to 2.7x against a large one and 11x to 13x against a reasoning model in our runs. Try your own rival in **Setup**, and see [About the models](docs/about-the-models.md).
+about 1.5x against a small LLM, about 2x against a large one and about 10x against a reasoning model in our runs. Try your own rival in **Setup**, and see [About the models](docs/about-the-models.md).
 
 **Do the models see the right answers?** No. They only get the applicant's file.
 
