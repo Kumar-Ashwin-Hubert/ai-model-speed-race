@@ -37,7 +37,7 @@ test('LLM desk: calls the Foundry v1 chat route with the rulebook prompt and par
     const result = await runtimeFor(stub).decide({ deskId: 2, paper: rejectPaper() });
     assert.equal(result.ok, true);
     assert.equal(result.decision, 'reject');
-    assert.deepEqual(result.usage, { inputTokens: 120, outputTokens: 2 });
+    assert.deepEqual(result.usage, { inputTokens: 120, outputTokens: 2, cachedTokens: 0 });
     assert.equal(result.attempts, 1);
     assert.equal(result.detail.kind, 'llm');
 
@@ -185,7 +185,7 @@ test('JEV via KodeKey: the questions go in response_format and the answers come 
     assert.equal(result.decision, 'reject');
     assert.deepEqual(result.detail.violated, ['contraband']);
     assert.equal(result.detail.mode, 'questions');
-    assert.deepEqual(result.usage, { inputTokens: 459, outputTokens: 108 });
+    assert.deepEqual(result.usage, { inputTokens: 459, outputTokens: 108, cachedTokens: 0 });
     assert.equal(result.model, 'typesafe/jev-1.13.0');
     assert.equal(stub.calls.length, 1, 'the mode is known up front, so there is no probe call');
 
@@ -246,7 +246,7 @@ test('JEV auto: falls back to the native System One route when the gateway has n
     assert.equal(result.ok, true);
     assert.equal(runtime.jevModes.get('DESK1'), 'systemone');
     assert.equal(result.decision, 'reject');
-    assert.deepEqual(result.usage, { inputTokens: 310, outputTokens: 0 });
+    assert.deepEqual(result.usage, { inputTokens: 310, outputTokens: 0, cachedTokens: 0 });
     assert.equal(result.model, 'jev-1.13.0');
     const native = stub.calls.at(-1);
     assert.equal(native.headers.authorization, 'Bearer kk-test');

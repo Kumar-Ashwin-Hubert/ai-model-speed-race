@@ -83,7 +83,8 @@ test('stats: accuracy, error direction, latency percentiles, tokens and cost', a
   assert.equal(stats.accuracy, 0.75);
   assert.equal(stats.falseApprovals, 1);
   assert.equal(stats.falseRejections, 1);
-  assert.equal(stats.errors, 0);
+  assert.equal(stats.wrong, 2, 'wrong counts the answers that did not match the truth, in both directions');
+  assert.equal(stats.errors, 0, 'wrong answers are not failed calls');
   assert.equal(stats.tokensIn, 800);
   assert.equal(stats.tokensOut, 40);
   assert.ok(Math.abs(stats.cost - (800 / 1e6) * 0.042) < 1e-12);
@@ -97,6 +98,59 @@ test('cost is unavailable when prices are not configured', async () => {
   await race.start();
   assert.equal(race.runs[1].stats(race.now()).cost, null);
   assert.notEqual(race.runs[0].stats(race.now()).cost, null);
+});
+
+// ---- Tokens and cost, from what the server reports per call -----------------------------------------
+
+/** Stats of a desk that has already decided `records` (only the fields the statistics read). */
+function statsOf(records, desk = {}) {
+  const race = makeRace({ desks: makeDesks({ 1: desk }) });
+  race.runs[0].records.push(...records.map((record) => ({ ok: true, latencyMs: 1, decision: 'approve', truth: 'approve', correct: true, usage: null, cost: null, ...record })));
+  return race.runs[0].stats(race.now());
+}
+
+const call = (inputTokens, outputTokens, usd, basis = 'list', cachedTokens = 0) => ({ usage: { inputTokens, outputTokens, cachedTokens }, cost: usd === null ? null : { usd, basis } });
+
+test('cost is the sum of the per-call costs the server worked out, and says where they come from', () => {
+  const stats = statsOf([call(210, 279, 0.001), call(210, 250, 0.002), call(210, 300, 0.003)], { priceIn: null, priceOut: null });
+  assert.ok(Math.abs(stats.cost - 0.006) < 1e-12, 'a desk with no configured price is still costed from the server\'s figures');
+  assert.equal(stats.costBasis, 'list');
+  assert.equal(statsOf([call(1, 1, 0.5, 'reported'), call(1, 1, 0.25, 'reported')]).costBasis, 'reported');
+  assert.equal(statsOf([call(1, 1, 0.5, 'reported'), call(1, 1, 0.25, 'list')]).costBasis, 'mixed');
+});
+
+test('tokens count every reply that reported usage, also the unusable ones that still spent them', () => {
+  const stats = statsOf([
+    call(100, 5, 0.001, 'list', 40),
+    { ok: false, decision: null, correct: false, error: 'empty reply (finish_reason=length)', ...call(210, 4096, 0.025, 'list', 182) },
+    { ok: false, decision: null, correct: false, error: 'HTTP 500', usage: null, cost: null },
+  ]);
+  assert.deepEqual([stats.tokensIn, stats.tokensOut, stats.tokensCached], [310, 4101, 222]);
+  assert.equal(stats.errors, 2);
+  assert.ok(Math.abs(stats.cost - 0.026) < 1e-12, 'the wasted reply is part of the bill; the call that never got an answer is not');
+  assert.equal(stats.tokensMissing, 0);
+});
+
+test('an answer that came without a usage block leaves tokens and cost unknown instead of zero', () => {
+  const stats = statsOf([call(100, 5, 0.001), { usage: null, cost: null }]);
+  assert.equal(stats.tokensMissing, 1);
+  assert.equal(stats.cost, null);
+  assert.equal(stats.costBasis, 'list');
+  assert.deepEqual([stats.tokensIn, stats.tokensOut], [100, 5]);
+});
+
+test('an older server sends no cost: tokens are priced at the desk\'s configured price, cached input included', () => {
+  const desk = { priceIn: 2, priceCachedIn: 0.5, priceOut: 6, priceSource: 'list' };
+  const stats = statsOf([{ usage: { inputTokens: 210, outputTokens: 279, cachedTokens: 182 } }, { usage: { inputTokens: 100, outputTokens: 5 } }], desk);
+  assert.ok(Math.abs(stats.cost - ((28 * 2 + 182 * 0.5 + 279 * 6) + (100 * 2 + 5 * 6)) / 1e6) < 1e-12);
+  assert.equal(stats.costBasis, 'list');
+  assert.equal(statsOf([{ usage: { inputTokens: 1, outputTokens: 1 } }], { priceIn: 1, priceOut: 1 }).costBasis, 'price', 'a server that does not say where the price comes from');
+});
+
+test('before the first reply a priced desk shows $0 and an unpriced one shows n/a', () => {
+  assert.equal(statsOf([]).cost, 0);
+  assert.equal(statsOf([], { priceIn: null, priceOut: null }).cost, null);
+  assert.equal(statsOf([]).costBasis, null);
 });
 
 test('a desk that fails its connection check sits out while the others race', async () => {
@@ -148,6 +202,8 @@ test('three failures in a row abort a desk, a success in between resets the coun
   assert.equal(flaky.rank, null);
   assert.match(flaky.note, /3 failures in a row/);
   assert.equal(flaky.stats(race.now()).errors, 5);
+  assert.equal(flaky.stats(race.now()).wrong, 0, 'failed calls are not wrong answers');
+  assert.ok(flaky.stats(race.now()).accuracy < 1, 'but they still count against accuracy');
   assert.equal(race.runs[0].rank, 1);
 });
 

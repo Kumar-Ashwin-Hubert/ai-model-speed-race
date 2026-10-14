@@ -1,3 +1,4 @@
+import { costOfUsage } from '../../shared/pricing.js';
 import { percentile } from './util.js';
 
 /**
@@ -16,6 +17,14 @@ const FATAL_CODES = new Set(['not_configured', 'unknown_desk', 'unsupported']);
 
 const isFatal = (result) => FATAL_STATUS.has(result?.status) || FATAL_CODES.has(result?.code);
 const sum = (values) => values.reduce((total, value) => total + value, 0);
+const known = (value) => value !== null && value !== undefined;
+
+/** What one call cost: the server's figure, or (from a server that predates it) its tokens at the desk's configured price. */
+function callCost(record, desk) {
+  if (Number.isFinite(record.cost?.usd)) return record.cost;
+  if (!record.usage || !known(desk.priceIn) || !known(desk.priceOut)) return null;
+  return { usd: costOfUsage(record.usage, { in: desk.priceIn, cachedIn: desk.priceCachedIn, out: desk.priceOut }), basis: desk.priceSource ?? 'price' };
+}
 
 class DeskRun {
   constructor(meta, papers) {
@@ -40,30 +49,45 @@ class DeskRun {
   stats(now) {
     const ok = this.records.filter((r) => r.ok);
     const latencies = ok.map((r) => r.latencyMs);
-    const tokensIn = sum(ok.map((r) => r.usage?.inputTokens ?? 0));
-    const tokensOut = sum(ok.map((r) => r.usage?.outputTokens ?? 0));
-    const { priceIn, priceOut } = this.meta;
-    const priced = priceIn !== null && priceIn !== undefined && priceOut !== null && priceOut !== undefined;
+    // Every reply that reported tokens counts, answered or not: a model that rambles itself out of budget still ran up the bill.
+    const metered = this.records.filter((r) => r.usage);
+    const tokensIn = sum(metered.map((r) => r.usage.inputTokens));
+    const tokensOut = sum(metered.map((r) => r.usage.outputTokens));
+    const tokensCached = sum(metered.map((r) => r.usage.cachedTokens ?? 0));
+    const costs = this.records.map((record) => ({ ok: record.ok, cost: callCost(record, this.meta) }));
+    const costed = costs.filter(({ cost }) => cost).map(({ cost }) => cost);
+    const bases = new Set(costed.map((cost) => cost.basis));
+    // A total is only honest when every answered call could be priced. A desk with a known price starts the race at $0.
+    const complete = costs.every(({ ok: answered, cost }) => !answered || cost);
+    const priced = known(this.meta.priceIn) && known(this.meta.priceOut);
     const end = this.finishedAt ?? now;
     const elapsedMs = this.startedAt === null ? 0 : Math.max(0, end - this.startedAt);
     const correct = this.records.filter((r) => r.correct).length;
+    const falseApprovals = ok.filter((r) => r.decision === 'approve' && r.truth === 'reject').length;
+    const falseRejections = ok.filter((r) => r.decision === 'reject' && r.truth === 'approve').length;
     return {
       done: this.records.length,
       total: this.total,
       approved: ok.filter((r) => r.decision === 'approve').length,
       denied: ok.filter((r) => r.decision === 'reject').length,
+      // Calls that gave no usable answer (timeouts, API errors, unreadable replies). Wrong answers are counted in `wrong`.
       errors: this.records.length - ok.length,
       correct,
       accuracy: this.records.length ? correct / this.records.length : null,
-      falseApprovals: ok.filter((r) => r.decision === 'approve' && r.truth === 'reject').length,
-      falseRejections: ok.filter((r) => r.decision === 'reject' && r.truth === 'approve').length,
+      falseApprovals,
+      falseRejections,
+      wrong: falseApprovals + falseRejections,
       lastMs: latencies.length ? latencies[latencies.length - 1] : null,
       avgMs: latencies.length ? sum(latencies) / latencies.length : null,
       p95Ms: percentile(latencies, 95),
       modelMs: sum(latencies),
       tokensIn,
       tokensOut,
-      cost: priced ? (tokensIn / 1e6) * priceIn + (tokensOut / 1e6) * priceOut : null,
+      tokensCached,
+      // Answers that came back without a usage block: their tokens (and so their cost) are unknown, not zero.
+      tokensMissing: ok.filter((r) => !r.usage).length,
+      cost: complete && (costed.length > 0 || priced) ? sum(costed.map((cost) => cost.usd)) : null,
+      costBasis: bases.size > 1 ? 'mixed' : ([...bases][0] ?? null),
       elapsedMs,
       perMinute: elapsedMs > 0 ? this.records.length / (elapsedMs / 60000) : null,
     };
@@ -178,7 +202,9 @@ export class Race {
       correct: ok && decision === paper.truth,
       latencyMs: result?.latencyMs ?? 0,
       attempts: result?.attempts ?? 1,
-      usage: ok ? result.usage : null,
+      // Tokens and cost of the reply, also when it was unusable: those tokens were spent.
+      usage: result?.usage ?? null,
+      cost: result?.cost ?? null,
       model: result?.model ?? null,
       detail: ok ? result.detail : null,
       error: ok ? null : (result?.error ?? 'Unknown error'),

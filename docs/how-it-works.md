@@ -22,11 +22,13 @@ In demo mode the server fakes the model calls instead; see [Setup](setup.md#1-tr
 - **Every desk gets identical applications in the same order** (seeded, see [Queue seed](#queue-seed)).
 - Each applicant has a hidden ground truth. Accuracy is checked against it, including *wrongly approved* cases, the costly kind.
 - **Cleared in** is wall-clock time and includes a small fixed animation cost per applicant, the same for every desk
-  (Standard pace: 230 ms; `Benchmark` pace removes it). **Avg decision / P95** are pure model latency.
+  (Standard pace: 230 ms; `Benchmark` pace removes it), plus the browser-to-server round trip of every decision (negligible when the server runs on your own machine,
+  noticeable when it is hosted far from you, for example on Azure). **Avg decision / P95** are pure model latency.
 - Latency is measured on the server around each model call. Retries and their backoff are included, because the approver
   really waited for them. One-off connection warm-up and call-mode detection are not counted.
 - A desk whose key is wrong or whose model keeps failing **stops and is never ranked**. Failing fast cannot win the race.
 - After the race, the report shows the speed-up, a bar chart, accuracy, tokens and cost (per 1,000 decisions too), and can be exported as JSON.
+  Where the tokens and costs come from is in [How cost and tokens are measured](setup.md#how-cost-and-tokens-are-measured).
 - Keep the game tab visible while racing: browsers slow timers in background tabs, which inflates *Cleared in* (the per-decision numbers are unaffected).
 
 ## How each model is asked

@@ -1,5 +1,5 @@
 export class UpstreamError extends Error {
-  constructor(message, { status = 0, retryable = false, code = 'upstream', retryAfterMs = null } = {}) {
+  constructor(message, { status = 0, retryable = false, code = 'upstream', retryAfterMs = null, billing = null } = {}) {
     super(message);
     this.name = 'UpstreamError';
     this.status = status;
@@ -7,6 +7,8 @@ export class UpstreamError extends Error {
     this.code = code;
     this.retryAfterMs = retryAfterMs;
     this.attempts = 1;
+    // Set when the model did answer but the reply was unusable: those tokens were still spent. See readBilling().
+    this.billing = billing;
   }
 }
 
@@ -85,7 +87,7 @@ export async function requestJson(url, { method = 'POST', headers = {}, body, si
   if (json === null) {
     throw new UpstreamError(`HTTP ${response.status}: response was not JSON ("${text.slice(0, 80)}")`, { status: response.status, code: 'invalid_output' });
   }
-  return { status: response.status, json };
+  return { status: response.status, json, headers: response.headers };
 }
 
 /** Retries transient failures with exponential backoff. Resolves `{ value, attempts }`. */

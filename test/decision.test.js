@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decideFromProbabilities, extractAnswers, parseDecision, probabilitiesFromAnswers, readUsage } from '../server/decision.js';
+import { decideFromProbabilities, extractAnswers, parseDecision, probabilitiesFromAnswers, readReportedCost, readUsage, withBilling } from '../server/decision.js';
+import { UpstreamError } from '../server/http.js';
 import { RULE_IDS } from '../shared/rulebook.js';
 
 test('parseDecision reads one-word and decorated replies', () => {
@@ -72,21 +73,80 @@ test('extractAnswers finds System One answers natively, in message content, in c
 });
 
 test('readUsage understands both OpenAI and System One usage shapes', () => {
-  assert.deepEqual(readUsage({ usage: { prompt_tokens: 10, completion_tokens: 3 } }), { inputTokens: 10, outputTokens: 3 });
-  assert.deepEqual(readUsage({ usage: { input_tokens: 392, output_tokens: 65 } }), { inputTokens: 392, outputTokens: 65 });
-  assert.deepEqual(readUsage({}), { inputTokens: 0, outputTokens: 0 });
+  assert.deepEqual(readUsage({ usage: { prompt_tokens: 10, completion_tokens: 3 } }), { inputTokens: 10, outputTokens: 3, cachedTokens: 0 });
+  assert.deepEqual(readUsage({ usage: { input_tokens: 392, output_tokens: 65 } }), { inputTokens: 392, outputTokens: 65, cachedTokens: 0 });
+  assert.deepEqual(readUsage({ usage: { input_tokens: '12', output_tokens: '3' } }), { inputTokens: 12, outputTokens: 3, cachedTokens: 0 }, 'numeric strings are accepted');
+});
+
+test('readUsage says "unknown" (null) when a response carries no token counts, instead of recording a zero', () => {
+  for (const json of [{}, null, undefined, { usage: null }, { usage: {} }, { usage: { total_tokens: 12 } }, { usage: { prompt_tokens: null, completion_tokens: '' } }, { usage: 'many' }]) {
+    assert.equal(readUsage(json), null, JSON.stringify(json));
+  }
+  // A reported zero is a real count, not an unknown.
+  assert.deepEqual(readUsage({ usage: { input_tokens: 0, output_tokens: 0 } }), { inputTokens: 0, outputTokens: 0, cachedTokens: 0 });
+  assert.deepEqual(readUsage({ usage: { prompt_tokens: 7 } }), { inputTokens: 7, outputTokens: 0, cachedTokens: 0 });
 });
 
 test('readUsage counts reasoning tokens that a provider reports outside completion_tokens, without double counting', () => {
   // xAI Grok shape (taken from a real reply): total = prompt + completion + reasoning
   const grok = { usage: { prompt_tokens: 213, completion_tokens: 1, total_tokens: 495, completion_tokens_details: { reasoning_tokens: 281 } } };
-  assert.deepEqual(readUsage(grok), { inputTokens: 213, outputTokens: 282 });
+  assert.deepEqual(readUsage(grok), { inputTokens: 213, outputTokens: 282, cachedTokens: 0 });
   // OpenAI shape: reasoning tokens are already part of completion_tokens, so nothing is added
   const openai = { usage: { prompt_tokens: 100, completion_tokens: 500, total_tokens: 600, completion_tokens_details: { reasoning_tokens: 300 } } };
-  assert.deepEqual(readUsage(openai), { inputTokens: 100, outputTokens: 500 });
+  assert.deepEqual(readUsage(openai), { inputTokens: 100, outputTokens: 500, cachedTokens: 0 });
   // Responses API shape
   const responses = { usage: { input_tokens: 100, output_tokens: 500, total_tokens: 600, output_tokens_details: { reasoning_tokens: 300 } } };
-  assert.deepEqual(readUsage(responses), { inputTokens: 100, outputTokens: 500 });
+  assert.deepEqual(readUsage(responses), { inputTokens: 100, outputTokens: 500, cachedTokens: 0 });
   // no total reported: trust completion_tokens
-  assert.deepEqual(readUsage({ usage: { prompt_tokens: 10, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 50 } } }), { inputTokens: 10, outputTokens: 2 });
+  assert.deepEqual(readUsage({ usage: { prompt_tokens: 10, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 50 } } }), { inputTokens: 10, outputTokens: 2, cachedTokens: 0 });
+});
+
+test('readUsage reports the cached part of the input from either usage shape, never more than the input itself', () => {
+  // Real Grok 4.7 reply on a repeated prompt: 182 of 210 prompt tokens came from the cache, reasoning is reported separately.
+  const grok = {
+    usage: {
+      prompt_tokens: 210,
+      completion_tokens: 2,
+      total_tokens: 489,
+      prompt_tokens_details: { cached_tokens: 182, text_tokens: 210 },
+      completion_tokens_details: { reasoning_tokens: 277 },
+    },
+  };
+  assert.deepEqual(readUsage(grok), { inputTokens: 210, outputTokens: 279, cachedTokens: 182 });
+  const responses = { usage: { input_tokens: 2048, output_tokens: 4, input_tokens_details: { cached_tokens: 1920, cache_write_tokens: 0 } } };
+  assert.deepEqual(readUsage(responses), { inputTokens: 2048, outputTokens: 4, cachedTokens: 1920 });
+  assert.equal(readUsage({ usage: { prompt_tokens: 10, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 99 } } }).cachedTokens, 10);
+});
+
+test('readReportedCost takes the provider\'s own figure from the usage block or the LiteLLM header, and nothing else', () => {
+  const header = (value) => new Headers(value === undefined ? {} : { 'x-litellm-response-cost': value });
+  // What KodeKey returns for a JEV call: the same figure in the body and in the header.
+  assert.equal(readReportedCost({ usage: { cost: 0.000019278 } }, header('1.9278000000000004e-05')), 0.000019278);
+  assert.equal(readReportedCost({ usage: { prompt_tokens: 1 } }, header('1.9278000000000004e-05')), 1.9278000000000004e-5);
+  assert.equal(readReportedCost({ usage: { cost: 0 } }, header()), 0, 'a reported zero is a real cost');
+  assert.equal(readReportedCost({ usage: { cost: 0.25 } }, undefined), 0.25, 'no headers at all');
+  for (const [json, headers] of [
+    [{ usage: {} }, header()],
+    [null, undefined],
+    [{ usage: { cost: null } }, header('')],
+    [{ usage: { cost: 'free' } }, header('n/a')],
+    [{ usage: { cost: -1 } }, header('-3')],
+    [{ usage: { cost: Number.NaN } }, header('Infinity')],
+  ]) {
+    assert.equal(readReportedCost(json, headers), null);
+  }
+});
+
+test('withBilling attaches tokens, reported cost and the serving model to a result, and to the error of an unusable reply', () => {
+  const json = { model: 'served-model', usage: { prompt_tokens: 20, completion_tokens: 5, cost: 0.5 } };
+  const ok = withBilling(json, undefined, 'deployment', () => ({ decision: 'approve' }));
+  assert.deepEqual(ok, { decision: 'approve', billing: { usage: { inputTokens: 20, outputTokens: 5, cachedTokens: 0 }, reportedCostUsd: 0.5, model: 'served-model' } });
+
+  const bare = withBilling({}, undefined, 'deployment', () => ({ decision: 'reject' }));
+  assert.deepEqual(bare.billing, { usage: null, reportedCostUsd: null, model: 'deployment' });
+
+  const unusable = new UpstreamError('empty reply', { code: 'invalid_output', status: 200 });
+  assert.throws(() => withBilling(json, undefined, 'deployment', () => { throw unusable; }), (error) => error === unusable && error.billing.usage.outputTokens === 5);
+  const unrelated = new Error('boom');
+  assert.throws(() => withBilling(json, undefined, 'deployment', () => { throw unrelated; }), (error) => error === unrelated && !('billing' in error));
 });

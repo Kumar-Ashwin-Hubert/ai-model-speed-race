@@ -38,11 +38,25 @@ export function fmtTokens(count) {
   return count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(Math.round(count));
 }
 
+/** A desk's total tokens, or "n/a" while every answer so far came without a usage block (unknown, not zero). */
+export function fmtTokenTotal(stats) {
+  const total = stats.tokensIn + stats.tokensOut;
+  return total === 0 && stats.tokensMissing > 0 ? 'n/a' : fmtTokens(total);
+}
+
 export function fmtMoney(usd) {
   if (usd === null || usd === undefined) return 'n/a';
   if (usd === 0) return '$0';
-  if (usd < 0.01) return `$${usd.toFixed(5).replace(/0+$/, '').replace(/\.$/, '')}`;
-  return `$${usd.toFixed(usd < 1 ? 3 : 2)}`;
+  // Two significant digits below a tenth of a cent, so micro-costs stay comparable ($0.000098 next to $0.0002).
+  const decimals = usd < 0.001 ? Math.min(8, 1 - Math.floor(Math.log10(usd))) : usd < 0.01 ? 5 : usd < 1 ? 3 : 2;
+  const text = usd.toFixed(decimals);
+  return `$${usd < 0.01 ? text.replace(/0+$/, '').replace(/\.$/, '') : text}`;
+}
+
+/** A price per million tokens: $0.042, $0.40, $2.00, or "free". */
+export function fmtPrice(usd) {
+  if (usd === 0) return 'free';
+  return `$${usd >= 0.1 ? usd.toFixed(2) : String(Number(usd.toFixed(4)))}`;
 }
 
 export const fmtPercent = (ratio) => (ratio === null || Number.isNaN(ratio) ? '-' : `${Math.round(ratio * 100)}%`);

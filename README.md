@@ -40,7 +40,9 @@ You need a KodeKey token (for JEV) and a key for an Azure AI Foundry resource (f
 3. Run `npm start` and press **Start shift**.
 
 Your keys stay in `.env` on your machine; the page never sees them. The full walkthrough is in **[Setup and configuration](docs/setup.md)**.
-A 20-applicant race makes about 60 small requests. In our runs JEV cost about $0.0004 per 20 decisions; add your deployment prices in `.env` to see the cost of the others.
+A 20-applicant race makes about 60 small requests. In our runs 20 decisions cost about $0.0004 with JEV, $0.0002 with Decision 1 and $0.002 with GPT-4.1 mini.
+A reasoning model costs much more per decision, because its reasoning tokens are billed as output.
+Tokens come from each response, and cost from the provider's own figure or a built-in list price; see [how cost and tokens are measured](docs/setup.md#how-cost-and-tokens-are-measured).
 
 ## What we measured
 

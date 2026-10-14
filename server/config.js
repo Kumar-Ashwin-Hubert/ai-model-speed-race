@@ -1,4 +1,4 @@
-const JEV_LIST_PRICE_IN = 0.042; // USD per 1M input tokens, output is free (TypeSafe list price)
+import { LIST_PRICES, listPriceFor } from '../shared/pricing.js';
 
 const PROVIDER_LABELS = { kodekey: 'KodeKey gateway', foundry: 'Azure AI Foundry' };
 const JEV_MODES = ['auto', 'questions', 'systemone'];
@@ -13,14 +13,15 @@ const DESK_DEFAULTS = {
   3: { provider: 'foundry', model: '', label: '' },
 };
 
-// Simulated models for `npm run demo`. `sim` picks the latency and accuracy profile in providers/mock.js.
+// Simulated models for `npm run demo`. `sim` picks the latency and accuracy profile in providers/mock.js and `price` the
+// list price (shared/pricing.js) of the real model it imitates, so a simulated race shows costs too.
 // The default line-up mirrors the live one (two System One models and a small LLM); the others can be seated from Setup.
 const MOCK_MODELS = {
-  JEV: { label: 'JEV', model: 'jev-sim', provider: 'kodekey', sim: 'jev' },
-  DECISION1: { label: 'Decision 1', model: 'decision-1-sim', provider: 'foundry', sim: 'decision1' },
-  FAST_LLM: { label: 'Fast LLM', model: 'fast-llm-sim', provider: 'foundry', sim: 'fast' },
-  LARGE_LLM: { label: 'Large LLM', model: 'large-llm-sim', provider: 'foundry', sim: 'large' },
-  REASONING_LLM: { label: 'Reasoning LLM', model: 'reasoning-llm-sim', provider: 'foundry', sim: 'reasoning' },
+  JEV: { label: 'JEV', model: 'jev-sim', provider: 'kodekey', sim: 'jev', price: 'jev' },
+  DECISION1: { label: 'Decision 1', model: 'decision-1-sim', provider: 'foundry', sim: 'decision1', price: 'decision-1' },
+  FAST_LLM: { label: 'Fast LLM', model: 'fast-llm-sim', provider: 'foundry', sim: 'fast', price: 'gpt-4.1-mini' },
+  LARGE_LLM: { label: 'Large LLM', model: 'large-llm-sim', provider: 'foundry', sim: 'large', price: 'gpt-4.1' },
+  REASONING_LLM: { label: 'Reasoning LLM', model: 'reasoning-llm-sim', provider: 'foundry', sim: 'reasoning', price: 'grok-4.7' },
 };
 const MOCK_LINEUP = ['JEV', 'DECISION1', 'FAST_LLM'];
 
@@ -101,7 +102,23 @@ export function azureAuth(hostname, apiKey) {
 
 const hasProfileVars = (env, name) => Object.keys(env).some((key) => key.startsWith(`MODEL_${name}_`));
 
-const PROFILE_KEY = /^MODEL_(.+)_(?:LABEL|MODEL|URL|PROVIDER|API|MODE|KIND|REASONING_EFFORT|TEMPERATURE|MAX_TOKENS|PRICE_IN|PRICE_OUT)$/;
+/**
+ * The USD-per-1M-token price a model is charged at. A price in .env wins over the built-in list price, field by field.
+ * The list's cached-input rate only applies while the input rate is the list's too; with your own input price, cached
+ * tokens cost the normal input rate unless you also set a cached one.
+ */
+function resolvePrice(env, listed) {
+  const fromEnv = env.in !== null || env.cachedIn !== null || env.out !== null;
+  if (!fromEnv && !listed) return { priceIn: null, priceOut: null, priceCachedIn: null, priceSource: null };
+  return {
+    priceIn: env.in ?? listed?.in ?? null,
+    priceOut: env.out ?? listed?.out ?? null,
+    priceCachedIn: env.cachedIn ?? (env.in === null ? listed?.cachedIn : null) ?? null,
+    priceSource: fromEnv ? 'env' : 'list',
+  };
+}
+
+const PROFILE_KEY = /^MODEL_(.+)_(?:LABEL|MODEL|URL|PROVIDER|API|MODE|KIND|REASONING_EFFORT|TEMPERATURE|MAX_TOKENS|PRICE_IN|PRICE_CACHED_IN|PRICE_OUT)$/;
 
 /** Every usable model profile in the environment (MODEL_<NAME>_*), in the order the variables appear. */
 function discoverProfiles(env) {
@@ -210,7 +227,10 @@ function buildDesk(name, env, providers, { mock, warnings }) {
   }
   if (!model) missing.push(`${prefix}MODEL`);
 
-  const listPriced = /jev/i.test(model) && provider === 'kodekey';
+  const price = resolvePrice(
+    { in: optionalNumber(read('PRICE_IN')), cachedIn: optionalNumber(read('PRICE_CACHED_IN')), out: optionalNumber(read('PRICE_OUT')) },
+    mockModel ? LIST_PRICES[mockModel.price] : listPriceFor(model),
+  );
   return {
     label,
     provider,
@@ -225,8 +245,7 @@ function buildDesk(name, env, providers, { mock, warnings }) {
     maxTokens: number(read('MAX_TOKENS'), 4096, { min: 16, max: 32768 }),
     temperature: optionalNumber(read('TEMPERATURE')),
     reasoningEffort: read('REASONING_EFFORT').toLowerCase(),
-    priceIn: optionalNumber(read('PRICE_IN')) ?? (listPriced ? JEV_LIST_PRICE_IN : null),
-    priceOut: optionalNumber(read('PRICE_OUT')) ?? (listPriced ? 0 : null),
+    ...price,
     configured: mock || missing.length === 0,
     missing: mock ? [] : missing,
     upstream,
@@ -289,8 +308,11 @@ export function publicConfig(config, resolvedModes = new Map(), resolvedApis = n
     api: desk.kind === 'llm' ? (config.mock ? 'simulated' : (resolvedApis.get(desk.profile) ?? desk.api)) : null,
     configured: desk.configured,
     missing: desk.missing,
+    envPrefix: desk.envPrefix,
     priceIn: desk.priceIn,
+    priceCachedIn: desk.priceCachedIn,
     priceOut: desk.priceOut,
+    priceSource: desk.priceSource,
   });
   return {
     mock: config.mock,

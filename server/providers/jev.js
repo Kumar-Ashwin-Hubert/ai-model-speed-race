@@ -1,6 +1,6 @@
 import { SAMPLE_PAPERS, buildSystemOneQuestions, dossierToText } from '../../shared/rulebook.js';
 import { UpstreamError, postChat, requestJson, withAuthFallback } from '../http.js';
-import { decideFromProbabilities, extractAnswers, extractText, probabilitiesFromAnswers, readUsage } from '../decision.js';
+import { decideFromProbabilities, extractAnswers, extractText, probabilitiesFromAnswers, withBilling } from '../decision.js';
 
 /**
  * How a System One model can be reached:
@@ -24,7 +24,7 @@ function buildQuestionsBody(desk, dossier) {
   };
 }
 
-function interpretJevReply(json, desk, mode) {
+function interpretJevReply(json, mode) {
   const answers = extractAnswers(json);
   if (!answers) {
     const content = extractText(json?.choices?.[0]?.message?.content).trim();
@@ -34,22 +34,15 @@ function interpretJevReply(json, desk, mode) {
   return {
     decision: result.decision,
     detail: { kind: 'systemone', mode, probabilities: result.probabilities, violated: result.violated, confidence: result.confidence },
-    usage: readUsage(json),
-    model: json?.model ?? desk.model,
   };
 }
 
 export async function callJevMode(mode, desk, dossier, options) {
-  if (mode === 'systemone') {
-    const { json } = await withAuthFallback(desk, (headers) =>
-      requestJson(desk.upstream.systemOneUrl, { headers, body: buildSystemOneBody(desk, dossier), ...options }),
-    );
-    return interpretJevReply(json, desk, mode);
-  }
-  const { json } = await withAuthFallback(desk, (headers) =>
-    postChat(desk.upstream.chatUrl, { headers, body: buildQuestionsBody(desk, dossier), ...options }),
-  );
-  return interpretJevReply(json, desk, mode);
+  const { json, headers } =
+    mode === 'systemone'
+      ? await withAuthFallback(desk, (authHeaders) => requestJson(desk.upstream.systemOneUrl, { headers: authHeaders, body: buildSystemOneBody(desk, dossier), ...options }))
+      : await withAuthFallback(desk, (authHeaders) => postChat(desk.upstream.chatUrl, { headers: authHeaders, body: buildQuestionsBody(desk, dossier), ...options }));
+  return withBilling(json, headers, desk.model, () => interpretJevReply(json, mode));
 }
 
 /**
