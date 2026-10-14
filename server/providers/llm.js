@@ -1,6 +1,6 @@
 import { SAMPLE_PAPERS, buildLlmMessages } from '../../shared/rulebook.js';
 import { UpstreamError, postChat, withAuthFallback } from '../http.js';
-import { extractText, parseDecision, readUsage } from '../decision.js';
+import { extractText, parseDecision, withBilling } from '../decision.js';
 
 const emptyReplyHint = (desk) => `if the model reasons, raise ${desk.envPrefix}MAX_TOKENS or lower ${desk.envPrefix}REASONING_EFFORT`;
 
@@ -39,8 +39,6 @@ function finish(reply, desk, extras) {
   return {
     decision,
     detail: { kind: 'llm', api: extras.api, reply: reply.slice(0, 200), finishReason: extras.finishReason },
-    usage: extras.usage,
-    model: extras.model,
   };
 }
 
@@ -51,8 +49,6 @@ function interpretChatReply(json, desk) {
     api: 'chat',
     stopReason: `finish_reason=${choice?.finish_reason ?? 'unknown'}`,
     finishReason: choice?.finish_reason ?? null,
-    usage: readUsage(json),
-    model: json?.model ?? desk.model,
   });
 }
 
@@ -79,8 +75,6 @@ function interpretResponsesReply(json, desk) {
     api: 'responses',
     stopReason: `status=${json?.status ?? 'unknown'}${incomplete ? `, ${incomplete}` : ''}`,
     finishReason: incomplete ?? json?.status ?? null,
-    usage: readUsage(json),
-    model: json?.model ?? desk.model,
   });
 }
 
@@ -90,15 +84,16 @@ export async function callLlm(desk, dossier, options, api = 'chat') {
   const url = responses ? desk.upstream.responsesUrl : desk.upstream.chatUrl;
   const body = responses ? buildResponsesBody(desk, dossier) : buildChatBody(desk, dossier);
   let json;
+  let headers;
   try {
-    ({ json } = await withAuthFallback(desk, (headers) => postChat(url, { headers, body, ...options })));
+    ({ json, headers } = await withAuthFallback(desk, (authHeaders) => postChat(url, { headers: authHeaders, body, ...options })));
   } catch (error) {
     if (!responses && error.code === 'http' && [400, 404].includes(error.status) && /does not work with|not supported|operation/i.test(error.message)) {
       error.message += ` | If this deployment only supports the Responses API, paste the portal's .../responses URL into ${desk.envPrefix}URL or set ${desk.envPrefix}API=responses.`;
     }
     throw error;
   }
-  return responses ? interpretResponsesReply(json, desk) : interpretChatReply(json, desk);
+  return withBilling(json, headers, desk.model, () => (responses ? interpretResponsesReply(json, desk) : interpretChatReply(json, desk)));
 }
 
 const API_UNSUPPORTED_STATUS = new Set([400, 404, 405, 415, 501]);

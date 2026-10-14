@@ -1,6 +1,7 @@
 import { FIELDS, RULES, SAMPLE_PAPERS, buildLlmMessages, buildSystemOneQuestions, dossierToText } from '../../shared/rulebook.js';
+import { PRICES_AS_OF, listPriceFor } from '../../shared/pricing.js';
 import { PACE } from './race.js';
-import { DESK_ACCENTS, el, fill, fmtMoney, fmtMs, fmtPercent, fmtTokens } from './util.js';
+import { DESK_ACCENTS, el, fill, fmtMoney, fmtMs, fmtPercent, fmtPrice, fmtTokenTotal, fmtTokens } from './util.js';
 
 const chip = (label, kind = 'neutral') => el('span', { class: `chip chip-${kind}` }, label);
 const section = (title, ...children) => el('section', { class: 'section' }, el('h4', {}, title), ...children);
@@ -8,6 +9,30 @@ const muted = (value) => el('p', { class: 'muted' }, value);
 
 const API_LABELS = { chat: 'Chat Completions API', responses: 'Responses API', auto: 'API auto-detect', simulated: 'simulated' };
 const callingLabel = (desk) => (desk.mode ? `call mode: ${desk.mode}` : desk.api ? (API_LABELS[desk.api] ?? desk.api) : null);
+
+/** Where a cost figure comes from, as shown under it in the report. */
+const COST_BASIS = { reported: 'reported by the provider', list: 'list price', env: '.env price', price: 'token price', mixed: 'mixed sources' };
+
+const tokenText = ({ inputTokens, outputTokens, cachedTokens }) => `${inputTokens} in${cachedTokens ? ` (${cachedTokens} cached)` : ''} / ${outputTokens} out tokens`;
+
+/** The env variable prefix of a desk's settings, for telling the user which price to set. */
+const envPrefixOf = (desk) => desk.envPrefix ?? `MODEL_${desk.profile}_`;
+
+/** True for a desk described by a server that predates prices: it has no `priceSource` field at all (null means "no price"). */
+const serverIsOlder = (desk) => desk.priceSource === undefined;
+
+/** A price is missing only because the server is older than the page: the page knows the list price of this model. */
+const needsRestartForPrice = (desk) => serverIsOlder(desk) && listPriceFor(desk.model) !== null;
+
+function priceText(desk) {
+  if (!Number.isFinite(desk.priceIn) || !Number.isFinite(desk.priceOut)) {
+    return needsRestartForPrice(desk)
+      ? 'price comes with a server restart ("npm start"), nothing to change in .env'
+      : `no price known yet, set ${envPrefixOf(desk)}PRICE_IN and ${envPrefixOf(desk)}PRICE_OUT`;
+  }
+  const cached = Number.isFinite(desk.priceCachedIn) ? ` / ${fmtPrice(desk.priceCachedIn)} cached` : '';
+  return `${fmtPrice(desk.priceIn)} in${cached} / ${fmtPrice(desk.priceOut)} out per 1M tokens`;
+}
 
 function decisionChip(record) {
   if (!record.ok) return chip('ERROR', 'warn');
@@ -42,7 +67,8 @@ function ruleBars(detail) {
 function decisionBlock(record, paper) {
   const meta = [fmtMs(record.latencyMs)];
   if (record.attempts > 1) meta.push(`${record.attempts} attempts`);
-  if (record.usage) meta.push(`${record.usage.inputTokens} in / ${record.usage.outputTokens} out tokens`);
+  if (record.usage) meta.push(tokenText(record.usage));
+  if (record.cost) meta.push(fmtMoney(record.cost.usd));
 
   const verdict = !record.ok
     ? el('p', { class: 'verdict bad' }, record.error)
@@ -204,7 +230,7 @@ function testResults(testState) {
 
 const deskStatus = (desk, config) => (desk.configured ? chip(config.mock ? 'simulated' : 'configured', 'ok') : chip(`missing ${desk.missing.join(', ')}`, 'bad'));
 
-const modelDescription = (desk) => [desk.providerLabel, callingLabel(desk)].filter(Boolean).join(' - ');
+const modelDescription = (desk) => [desk.providerLabel, callingLabel(desk), priceText(desk)].filter(Boolean).join(' - ');
 
 /** One picker per desk, offering every model defined in .env. Nothing but a model's name leaves this page. */
 function lineupSection({ config, lineup, locked, onLineup, onResetLineup }) {
@@ -339,6 +365,59 @@ function accuracyBreakdown(row) {
   return parts.length ? el('div', { class: 'muted small' }, parts.join(', ')) : null;
 }
 
+/** A JEV row reached through KodeKey: its token counts include the gateway's own accounting, so it carries a footnote marker. */
+const kodekeyCounted = (row) => row.done > 0 && row.desk.provider === 'kodekey' && row.desk.kind === 'systemone';
+
+function tokensCell(row) {
+  const total = row.tokensIn + row.tokensOut;
+  return el(
+    'td',
+    {},
+    `${fmtTokenTotal(row)}${kodekeyCounted(row) ? ' *' : ''}`,
+    total > 0 ? el('div', { class: 'muted small' }, `${fmtTokens(row.tokensIn)} in / ${fmtTokens(row.tokensOut)} out`) : null,
+    row.tokensCached > 0 ? el('div', { class: 'muted small' }, `${fmtTokens(row.tokensCached)} cached`) : null,
+    row.tokensMissing > 0 ? el('div', { class: 'muted small' }, `${row.tokensMissing} without usage`) : null,
+  );
+}
+
+function costCell(row) {
+  return el(
+    'td',
+    {},
+    `${fmtMoney(row.cost)}${kodekeyCounted(row) && row.cost !== null ? ' *' : ''}`,
+    row.cost !== null && row.done > 0 ? el('div', { class: 'muted small' }, `${fmtMoney((row.cost / row.done) * 1000)} per 1k decisions`) : null,
+    row.costBasis ? el('div', { class: 'muted small' }, COST_BASIS[row.costBasis] ?? row.costBasis) : null,
+  );
+}
+
+/** Where the tokens and costs come from, and which desks are missing one. */
+function costNotes(rows, config) {
+  const notes = [
+    el('li', {}, config.mock
+      ? 'Tokens are simulated, modelled on live responses, and each simulated model is priced like the real model it imitates (list price).'
+      : 'Tokens are read from the usage block of each API response, never estimated. Reasoning tokens count as output, and a reply that turned out unusable still counts: its tokens were spent.'),
+  ];
+  if (!config.mock) {
+    notes.push(el('li', {}, `Cost is the figure the provider reports for a call where it reports one (KodeKey does). Otherwise it is tokens times a price per million tokens: the one in .env, or the built-in pay-as-you-go list price (Azure Global Standard, ${PRICES_AS_OF}), with cached input at the cached rate. Azure reports no cost per call, so an invoice can differ (Data Zone or Regional deployments, discounts).`));
+  }
+  if (rows.some(kodekeyCounted)) {
+    notes.push(el('li', {}, config.mock
+      ? '* The simulated JEV reports tokens the way KodeKey does (about 250 more input tokens per request than the request contains, and its JSON answers counted as output text), while the simulated Decision 1 counts only what is sent. JEV\'s token counts are therefore not like-for-like with the others\', and its simulated cost includes that overhead.'
+      : '* JEV via KodeKey: KodeKey reports about 250 more input tokens per request than the request contains (measured 14 October 2026) and counts the JSON answers as output text, while Azure\'s Decision 1 counts only what is sent. JEV\'s token counts are therefore not like-for-like with other providers\', and its cost is what KodeKey reports for that route, overhead included.'));
+  }
+  for (const row of rows) {
+    const { label, model } = row.desk;
+    if (row.tokensMissing > 0) {
+      notes.push(el('li', { class: 'warn' }, `${label}: ${row.tokensMissing} of ${row.done} answers came back without a usage block, so its token and cost figures are incomplete.`));
+    } else if (row.cost === null && row.done > 0) {
+      notes.push(el('li', { class: 'warn' }, needsRestartForPrice(row.desk)
+        ? `${label}: cost is n/a because this server is older than the page. Restart it with "npm start" and ${label} is priced automatically; nothing needs changing in .env.`
+        : `${label}: cost is n/a because no price is known for "${model}". Set ${envPrefixOf(row.desk)}PRICE_IN and ${envPrefixOf(row.desk)}PRICE_OUT (USD per 1M tokens) in .env.`));
+    }
+  }
+  return notes;
+}
+
 export function renderResults(dialog, { race, config, summary, onRunAgain, onExport, onClose }) {
   const running = race.status !== 'finished';
   const rows = [...summary.rows].sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99) || a.desk.id - b.desk.id);
@@ -351,8 +430,8 @@ export function renderResults(dialog, { race, config, summary, onRunAgain, onExp
     el('td', {}, fmtMs(row.p95Ms)),
     el('td', {}, row.perMinute ? `${row.perMinute.toFixed(row.perMinute < 100 ? 1 : 0)}/min` : '-'),
     el('td', {}, fmtPercent(row.accuracy), accuracyBreakdown(row)),
-    el('td', {}, fmtTokens(row.tokensIn + row.tokensOut)),
-    el('td', {}, fmtMoney(row.cost), row.cost !== null && row.done > 0 ? el('div', { class: 'muted small' }, `${fmtMoney((row.cost / row.done) * 1000)} per 1k decisions`) : null),
+    tokensCell(row),
+    costCell(row),
   ];
 
   fill(dialog, 
@@ -365,10 +444,10 @@ export function renderResults(dialog, { race, config, summary, onRunAgain, onExp
         el('tbody', {}, rows.map((row) => el('tr', { class: row.rank === 1 ? 'winner' : '' }, cells(row)))),
       ),
       el('ul', { class: 'notes' }, [
-        el('li', {}, `Wall-clock time includes a fixed ${summary.overheadMs} ms of animation per applicant for every desk (${summary.pace.label} pace). Avg decision and P95 are pure model latency.`),
+        el('li', {}, `Wall-clock time includes a fixed ${summary.overheadMs} ms of animation per applicant for every desk (${summary.pace.label} pace) and the browser-to-server round trip of every decision (negligible on your own machine, noticeable when the server is hosted far from you). Avg decision and P95 are pure model latency.`),
         el('li', {}, 'Latency is measured server-side around each model call, retries included. Connection warm-up and one-off call-mode detection are excluded.'),
-        el('li', {}, 'Accuracy is checked against each application\'s hidden ground truth; failed calls count as wrong. Cost uses token usage and the prices in .env (JEV: published list price).'),
-        rows.some((row) => row.cost === null) ? el('li', {}, 'Cost shows n/a for desks without DESKn_PRICE_IN and DESKn_PRICE_OUT in .env. Add your model prices there to compare cost as well as speed.') : null,
+        el('li', {}, 'Accuracy is checked against each application\'s hidden ground truth; failed calls count as wrong.'),
+        ...costNotes(rows, config),
         ...retryNotes(rows),
         config.mock ? el('li', { class: 'warn' }, 'SIMULATED RUN: the delays are modelled on live runs, but none of these numbers is a measurement of a real model.') : null,
       ]),

@@ -1,4 +1,4 @@
-import { DESK_ACCENTS, clamp, easeInOut, easeOutCubic, fmtMoney, fmtMs, fmtClock, fmtPercent, fmtTokens } from './util.js';
+import { DESK_ACCENTS, clamp, easeInOut, easeOutCubic, fmtMoney, fmtMs, fmtClock, fmtPercent, fmtTokenTotal } from './util.js';
 
 const WORLD = { w: 1280, h: 720 };
 
@@ -741,7 +741,7 @@ export class Renderer {
     const rows = [
       [{ t: `Last ${fmtMs(stats.lastMs)}` }, { t: `Avg ${fmtMs(stats.avgMs)}` }, { t: `P95 ${fmtMs(stats.p95Ms)}` }],
       [{ t: `Acc ${fmtPercent(stats.accuracy)}` }, { t: `Wrong ${stats.wrong}`, c: stats.wrong > 0 ? C.deny : null }, { t: stats.perMinute ? `${stats.perMinute.toFixed(stats.perMinute < 100 ? 1 : 0)}/min` : '-/min' }],
-      [{ t: `Tok ${fmtTokens(stats.tokensIn + stats.tokensOut)}` }, { t: `Cost ${fmtMoney(stats.cost)}` }, { t: `Failed ${stats.errors}`, c: stats.errors > 0 ? C.deny : null }],
+      [{ t: `Tok ${fmtTokenTotal(stats)}` }, { t: `Cost ${fmtMoney(stats.cost)}` }, { t: `Failed ${stats.errors}`, c: stats.errors > 0 ? C.deny : null }],
     ];
     rows.forEach((cols, r) => {
       const y = Y.card + 45 + r * 16;

@@ -1,4 +1,5 @@
 import { SAMPLE_PAPERS } from '../shared/rulebook.js';
+import { costOfUsage, listPriceFor } from '../shared/pricing.js';
 import { publicConfig } from './config.js';
 import { UpstreamError, requestJson, withAuthFallback, withRetries } from './http.js';
 import { callJevMode, probeJevMode } from './providers/jev.js';
@@ -6,6 +7,23 @@ import { callLlm, probeLlmApi } from './providers/llm.js';
 import { callMock } from './providers/mock.js';
 
 const round1 = (value) => Math.round(value * 10) / 10;
+
+/** The price a desk's calls are charged at: the one configured for it, else the list price of the model a response names. */
+function priceFor(desk, model) {
+  if (desk.priceIn !== null && desk.priceOut !== null) return { in: desk.priceIn, cachedIn: desk.priceCachedIn, out: desk.priceOut, basis: desk.priceSource ?? 'env' };
+  const listed = listPriceFor(model, desk.model);
+  return listed ? { ...listed, basis: 'list' } : null;
+}
+
+/**
+ * Tokens and cost of one response. A cost the provider reports (KodeKey does) is used as it is; otherwise the cost is the
+ * tokens it reports times the desk's price, and null when there is no usage block or no price to apply.
+ */
+function meter(desk, { usage, reportedCostUsd, model }) {
+  if (reportedCostUsd !== null) return { usage, cost: { usd: reportedCostUsd, basis: 'reported' } };
+  const price = usage ? priceFor(desk, model) : null;
+  return { usage, cost: price ? { usd: costOfUsage(usage, price), basis: price.basis } : null };
+}
 
 /** Removes any configured API key from text that is about to leave the server. */
 function makeRedactor(config) {
@@ -98,6 +116,8 @@ export function createRuntime(config, { fetchImpl = globalThis.fetch, clock = ()
       status: known ? error.status : 0,
       latencyMs: started === null ? 0 : round1(clock() - started),
       attempts: known ? (error.attempts ?? attempts) : attempts,
+      // A reply that came back but was unusable still used tokens.
+      ...(known && error.billing ? meter(desk, error.billing) : {}),
     };
   };
 
@@ -125,8 +145,8 @@ export function createRuntime(config, { fetchImpl = globalThis.fetch, clock = ()
         decision: value.decision,
         latencyMs: round1(clock() - started),
         attempts,
-        usage: value.usage,
-        model: value.model,
+        ...meter(desk, value.billing),
+        model: value.billing.model,
         detail: value.detail,
       };
     } catch (error) {

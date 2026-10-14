@@ -23,15 +23,59 @@ export function extractText(content) {
   return '';
 }
 
+const tokenCount = (value) => ((typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value)) ? Number(value) : null);
+
+/**
+ * The token counts a response reports, or null when it carries no usage block at all (so the caller can say "unknown"
+ * instead of recording a made-up zero). `cachedTokens` is the part of `inputTokens` served from the prompt cache.
+ */
 export function readUsage(json) {
-  const usage = json?.usage ?? {};
-  const inputTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
-  let outputTokens = Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+  const usage = json?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const reportedIn = tokenCount(usage.input_tokens) ?? tokenCount(usage.prompt_tokens);
+  const reportedOut = tokenCount(usage.output_tokens) ?? tokenCount(usage.completion_tokens);
+  if (reportedIn === null && reportedOut === null) return null;
+  const inputTokens = reportedIn ?? 0;
+  let outputTokens = reportedOut ?? 0;
   // xAI's Grok reports reasoning tokens next to completion_tokens instead of inside it (total = prompt + completion + reasoning),
   // yet bills them as output. OpenAI-style models already include them, so only add them when the totals show they are separate.
-  const reasoning = Number(usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens ?? 0) || 0;
+  const reasoning = tokenCount(usage.completion_tokens_details?.reasoning_tokens) ?? tokenCount(usage.output_tokens_details?.reasoning_tokens) ?? 0;
   if (reasoning > 0 && Number(usage.total_tokens) >= inputTokens + outputTokens + reasoning) outputTokens += reasoning;
-  return { inputTokens, outputTokens };
+  const cached = tokenCount(usage.input_tokens_details?.cached_tokens) ?? tokenCount(usage.prompt_tokens_details?.cached_tokens) ?? 0;
+  return { inputTokens, outputTokens, cachedTokens: Math.min(cached, inputTokens) };
+}
+
+const REPORTED_COST_HEADER = 'x-litellm-response-cost';
+
+/**
+ * The cost in USD that the provider itself reports for one call, or null. LiteLLM gateways such as KodeKey put it in
+ * `usage.cost` and in the x-litellm-response-cost header; Azure reports none.
+ */
+export function readReportedCost(json, headers) {
+  for (const candidate of [json?.usage?.cost, headers?.get?.(REPORTED_COST_HEADER)]) {
+    const value = typeof candidate === 'string' && candidate.trim() !== '' ? Number(candidate) : candidate;
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+/** Everything a response says about what it cost: tokens, the provider's own cost figure, and the model that served it. */
+export function readBilling(json, headers, fallbackModel) {
+  return { usage: readUsage(json), reportedCostUsd: readReportedCost(json, headers), model: json?.model ?? fallbackModel };
+}
+
+/**
+ * Runs `interpret()` and attaches the billing of the response to its result. When the reply turns out to be unusable the
+ * billing goes onto the error instead: the model still answered, so its tokens were still spent.
+ */
+export function withBilling(json, headers, fallbackModel, interpret) {
+  const billing = readBilling(json, headers, fallbackModel);
+  try {
+    return { ...interpret(), billing };
+  } catch (error) {
+    if (error instanceof UpstreamError && !error.billing) error.billing = billing;
+    throw error;
+  }
 }
 
 function parseJsonLoose(text) {

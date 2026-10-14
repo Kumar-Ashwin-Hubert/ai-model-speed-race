@@ -39,7 +39,7 @@ test('Responses desk: speaks the Responses API with instructions, input, token c
     const result = await runtime.decide({ deskId: 2, paper: rejectPaper() });
     assert.equal(result.ok, true);
     assert.equal(result.decision, 'reject');
-    assert.deepEqual(result.usage, { inputTokens: 150, outputTokens: 3 });
+    assert.deepEqual(result.usage, { inputTokens: 150, outputTokens: 3, cachedTokens: 0 });
     assert.equal(result.detail.api, 'responses');
     assert.equal(result.model, 'gpt-4.1-mini-2025-04-14');
 
@@ -196,7 +196,7 @@ test('Foundry System One: native provider route, deployment name as model, typed
     assert.equal(result.decision, 'reject');
     assert.deepEqual(result.detail.violated, ['contraband']);
     assert.equal(result.detail.mode, 'systemone');
-    assert.deepEqual(result.usage, { inputTokens: 280, outputTokens: 0 });
+    assert.deepEqual(result.usage, { inputTokens: 280, outputTokens: 0, cachedTokens: 0 });
     assert.equal(stub.calls.length, 1);
 
     const [call] = stub.calls;

@@ -60,10 +60,15 @@ export async function callMock(desk, paper, { signal } = {}) {
 
   const truth = paper.hint?.truth === 'reject' ? 'reject' : 'approve';
   const decision = mistake ? (truth === 'approve' ? 'reject' : 'approve') : truth;
-  const usage = { inputTokens: Math.round(profile.tokensIn * (0.9 + rng() * 0.2)), outputTokens: profile.tokensOut };
+  // Simulated token counts. The runtime prices them like a real response, with the list price of the model this desk imitates.
+  const billing = {
+    usage: { inputTokens: Math.round(profile.tokensIn * (0.9 + rng() * 0.2)), outputTokens: profile.tokensOut, cachedTokens: 0 },
+    reportedCostUsd: null,
+    model: desk.model,
+  };
 
   if (desk.kind !== 'systemone') {
-    return { decision, detail: { kind: 'llm', reply: decision.toUpperCase(), finishReason: 'stop' }, usage, model: desk.model };
+    return { decision, detail: { kind: 'llm', reply: decision.toUpperCase(), finishReason: 'stop' }, billing };
   }
   const hinted = paper.hint?.violations ?? [];
   const violated = decision === 'reject' ? (hinted.length ? hinted : [RULE_IDS[Math.floor(rng() * RULE_IDS.length)]]) : [];
@@ -72,7 +77,6 @@ export async function callMock(desk, paper, { signal } = {}) {
   return {
     decision: result.decision,
     detail: { kind: 'systemone', mode: 'simulated', probabilities, violated: result.violated, confidence: result.confidence },
-    usage,
-    model: desk.model,
+    billing,
   };
 }

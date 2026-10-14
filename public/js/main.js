@@ -336,11 +336,18 @@ function exportResults() {
       clearedInMs: row.rank ? Math.round(row.elapsedMs) : null, speedupVsSlowest: row.speedup ?? null,
       avgLatencyMs: row.avgMs, p95LatencyMs: row.p95Ms, totalModelTimeMs: Math.round(row.modelMs),
       accuracy: row.accuracy, errors: row.errors, wronglyApproved: row.falseApprovals, wronglyRejected: row.falseRejections,
-      tokensIn: row.tokensIn, tokensOut: row.tokensOut, estimatedCostUsd: row.cost, decisionsPerMinute: row.perMinute,
+      tokensIn: row.tokensIn, tokensOut: row.tokensOut, tokensCached: row.tokensCached, costUsd: row.cost, costBasis: row.costBasis, decisionsPerMinute: row.perMinute,
     })),
     papers: race.papers.map((paper) => ({ id: paper.id, truth: paper.truth, violations: paper.violations })),
     decisions: Object.fromEntries(
-      race.runs.map((run) => [run.meta.id, run.records.map((r) => ({ paperId: r.paperId, decision: r.decision, correct: r.correct, latencyMs: r.latencyMs, attempts: r.attempts, error: r.error }))]),
+      race.runs.map((run) => [
+        run.meta.id,
+        run.records.map((r) => ({
+          paperId: r.paperId, decision: r.decision, correct: r.correct, latencyMs: r.latencyMs, attempts: r.attempts, error: r.error,
+          tokensIn: r.usage?.inputTokens ?? null, tokensOut: r.usage?.outputTokens ?? null, tokensCached: r.usage?.cachedTokens ?? null,
+          costUsd: r.cost?.usd ?? null, costBasis: r.cost?.basis ?? null,
+        })),
+      ]),
     ),
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
